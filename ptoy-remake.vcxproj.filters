@@ -27,6 +27,9 @@
     <ClInclude Include="ptoy-remake.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="particle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="MakeFireTest.cpp">

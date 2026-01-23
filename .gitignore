@@ -67,3 +67,7 @@ out/
 
 # debug information files
 *.dwo
+
+# AI coding assistants
+.claude/
+.codex/

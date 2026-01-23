@@ -5,7 +5,10 @@
 #include <windows.h>
 #include <cstdint>
 #include <random>
+#include <vector>
 #include <windowsx.h>
+
+#include "particle.h"
 
 // ------------------------------------------------------------
 // Backbuffer (what we DISPLAY): 32-bit pixels (0x00RRGGBB)
@@ -25,6 +28,10 @@ static uint32_t gPalette[256] = {};      // palette[heat] -> 0x00RRGGBB
 // RNG (useful later for "sparklies" etc. - not required for basic fire)
 static std::mt19937 rng{ std::random_device{}() };
 static std::uniform_int_distribution<int> dist(0, 255);
+
+// Particle system
+static std::vector<Particle> particles;
+static const int INITIAL_PARTICLE_RESERVE = 100000;
 
 // Mouse coordinates stored in WINDOW client space (not buffer space)
 static int gMouseX = 1;
@@ -119,6 +126,9 @@ static void InitBackbuffer(HWND hwnd)
 
     // Build our heat->color palette.
     BuildFirePalette();
+
+    // Reserve space for particles (avoids reallocation during normal use)
+    particles.reserve(INITIAL_PARTICLE_RESERVE);
 }
 
 // ------------------------------------------------------------
