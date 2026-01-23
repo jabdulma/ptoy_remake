@@ -133,7 +133,7 @@
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="ptoy-remake.cpp" />
+    <ClCompile Include="MakeFireTest.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ptoy-remake.rc" />
@@ -141,6 +141,9 @@
   <ItemGroup>
     <Image Include="ptoy-remake.ico" />
     <Image Include="small.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="ptoy-remake.cpp.disabled" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

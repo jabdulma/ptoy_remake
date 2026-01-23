@@ -29,7 +29,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="ptoy-remake.cpp">
+    <ClCompile Include="MakeFireTest.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -45,5 +45,10 @@
     <Image Include="ptoy-remake.ico">
       <Filter>Resource Files</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="ptoy-remake.cpp.disabled">
+      <Filter>Source Files</Filter>
+    </None>
   </ItemGroup>
 </Project>
