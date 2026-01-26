@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <cstdint>
+#include <cmath>
 #include <random>
 #include <vector>
 #include <windowsx.h>
@@ -15,8 +16,8 @@
 // Heat buffer (what we SIMULATE): 8-bit intensity (0..255)
 // ------------------------------------------------------------
 
-static int gW = 640;
-static int gH = 360;
+static int gW = 1600;
+static int gH = 1200;
 
 static BITMAPINFO gBmi = {};
 static void* gPixels = nullptr;          // raw pointer returned by CreateDIBSection
@@ -28,6 +29,13 @@ static uint32_t gPalette[256] = {};      // palette[heat] -> 0x00RRGGBB
 // RNG (useful later for "sparklies" etc. - not required for basic fire)
 static std::mt19937 rng{ std::random_device{}() };
 static std::uniform_int_distribution<int> dist(0, 255);
+static std::uniform_real_distribution<float> angleDist(0.0f, 6.283185f);  // 0 to 2*PI
+static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f); // ±15% speed variance
+static std::uniform_real_distribution<float> chance(0.0f, 1.0f);          // for percentage rolls
+
+// Speed as fraction of screen width per frame (resolution-independent)
+static const float PARTICLE_SPEED_FACTOR = 0.004f;  // 0.4% of screen width per frame
+static float userSpeedMultiplier = 1.0f;            // for future UI control
 
 // Particle system
 static std::vector<Particle> particles;
@@ -40,35 +48,34 @@ static bool mouseDown = false;
 
 // Fire tuning
 static const int DONTBURN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 1;   // how fast heat decays (bigger = faster fade)
+static const int BURNFADE = 2;   // how fast heat decays (bigger = faster fade)
 
 // ------------------------------------------------------------
 // Helper: build a simple "fire" palette.
 // heat 0   -> black
-// heat mid -> red/orange
+// heat mid -> green
 // heat 255 -> white
 // ------------------------------------------------------------
 static void BuildFirePalette()
 {
     for (int i = 0; i < 256; i++)
     {
-        // This is a simple ramp. Feel free to tune it later.
-        // Piecewise: black -> red -> yellow -> white
+        // Piecewise: black -> green -> yellow -> white
         int r = 0, g = 0, b = 0;
 
         if (i < 128)
         {
-            // 0..127: black -> red
-            r = i * 2;   // 0..254
-            g = 0;
+            // 0..127: black -> green
+            r = 0;
+            g = i * 2;   // 0..254
             b = 0;
         }
         else
         {
-            // 128..255: red -> yellow -> white-ish
-            r = 255;
-            g = (i - 128) * 2;         // 0..254
-            if (g > 255) g = 255;
+            // 128..255: green -> yellow -> white-ish
+            g = 255;
+            r = (i - 128) * 2;         // 0..254
+            if (r > 255) r = 255;
 
             // Add a little blue near the top end to approach white
             b = (i - 200) * 4;         // starts turning on around 200
@@ -132,6 +139,134 @@ static void InitBackbuffer(HWND hwnd)
 }
 
 // ------------------------------------------------------------
+// EmitParticle: spawn a particle at (x,y) with a random direction
+// ------------------------------------------------------------
+static void EmitParticle(float x, float y, float speed)
+{
+    float angle = angleDist(rng);
+
+    Particle p;
+    p.x = x;
+    p.y = y;
+    p.dx = cosf(angle) * speed;
+    p.dy = sinf(angle) * speed;
+    p.heat = 255;
+    p.color = 0x00FFFFFF;  // white for now
+    p.active = true;
+
+    particles.push_back(p);
+}
+
+// ------------------------------------------------------------
+// EmitFirework: spawn many particles in all directions from a point
+// 90% get normal speed (with some variance), 10% get 40% speed (stragglers)
+// ------------------------------------------------------------
+static void EmitFirework(float x, float y, int count)
+{
+    // Clear existing particles
+    particles.clear();
+
+    // Calculate base speed from screen width (resolution-independent)
+    float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+
+    for (int i = 0; i < count; i++)
+    {
+        float speed;
+        if (chance(rng) < 0.10f)
+        {
+            // 10% are slow stragglers (with variance)
+            speed = baseSpeed * 0.4f * speedVariance(rng);
+        }
+        else
+        {
+            // 90% get normal speed with ±15% variance
+            speed = baseSpeed * speedVariance(rng);
+        }
+        EmitParticle(x, y, speed);
+    }
+}
+
+// ------------------------------------------------------------
+// DepositHeatLine: draw a line of heat from (x0,y0) to (x1,y1)
+// ------------------------------------------------------------
+static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat)
+{
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    // Number of steps = distance, so we deposit at least once per pixel
+    int steps = (int)dist + 1;
+
+    for (int i = 0; i <= steps; i++)
+    {
+        float t = (steps > 0) ? (float)i / steps : 0.0f;
+        int ix = (int)(x0 + dx * t);
+        int iy = (int)(y0 + dy * t);
+
+        // Deposit heat in a small area
+        for (int oy = -1; oy <= 1; oy++)
+        {
+            for (int ox = -1; ox <= 1; ox++)
+            {
+                int hx = ix + ox;
+                int hy = iy + oy;
+                if ((unsigned)hx < (unsigned)gW && (unsigned)hy < (unsigned)gH)
+                {
+                    gHeat[hy * gW + hx] = heat;
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------
+// UpdateParticles: move particles, deposit heat, deactivate if off-screen
+// ------------------------------------------------------------
+static void UpdateParticles()
+{
+    for (size_t i = 0; i < particles.size(); i++)
+    {
+        Particle& p = particles[i];
+        if (!p.active) continue;
+
+        // Store previous position
+        float prevX = p.x;
+        float prevY = p.y;
+
+        // Move particle
+        p.x += p.dx;
+        p.y += p.dy;
+
+        // Bounce off walls
+        if (p.x < 0)
+        {
+            p.x = -p.x;
+            p.dx = -p.dx;
+        }
+        else if (p.x >= gW)
+        {
+            p.x = 2 * gW - p.x - 1;
+            p.dx = -p.dx;
+        }
+
+        if (p.y < 0)
+        {
+            p.y = -p.y;
+            p.dy = -p.dy;
+        }
+        else if (p.y >= gH)
+        {
+            p.y = 2 * gH - p.y - 1;
+            p.dy = -p.dy;
+        }
+
+        // Deposit heat along the line from previous to current position
+        DepositHeatLine(prevX, prevY, p.x, p.y, p.heat);
+    }
+}
+
+// ------------------------------------------------------------
 // RenderFire: 1) inject heat (mouse) 2) update heat 3) map heat->pixels
 // IMPORTANT: This updates gHeat in place (like Seumas' sample).
 // ------------------------------------------------------------
@@ -171,6 +306,11 @@ static void RenderFire(HWND hwnd)
                 gHeat[y * gW + x] = 255;
             }
         }
+
+    // ----------------------------
+    // 1b) Update particles - move them and deposit heat
+    // ----------------------------
+    UpdateParticles();
 
     // ----------------------------
     // 2) Update heat using Seumas' "mutated box filter"
@@ -286,6 +426,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         ReleaseCapture();
         return 0;
 
+    case WM_RBUTTONDOWN:
+    {
+        // Convert window coords to buffer coords
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int winW = rc.right - rc.left;
+        int winH = rc.bottom - rc.top;
+
+        int mx = GET_X_LPARAM(lParam);
+        int my = GET_Y_LPARAM(lParam);
+
+        float bx = (float)mx * gW / (winW ? winW : 1);
+        float by = (float)my * gH / (winH ? winH : 1);
+
+        EmitFirework(bx, by, 2000);
+        return 0;
+    }
+
     case WM_CANCELMODE:
     case WM_KILLFOCUS:
         ReleaseCapture();
@@ -316,7 +474,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         cls,
         L"Particle Toy: Remake - Have fun!",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1600, 1200,
         nullptr, nullptr, hInstance, nullptr
     );
 

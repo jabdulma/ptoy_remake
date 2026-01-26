@@ -68,6 +68,12 @@ out/
 # debug information files
 *.dwo
 
+# VS resource editor cache
+*.aps
+
+# Empty build artifact directory
+ptoy-remake/
+
 # AI coding assistants
 .claude/
 .codex/
