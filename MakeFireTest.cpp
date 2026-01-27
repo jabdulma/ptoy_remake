@@ -148,6 +148,8 @@ static void EmitParticle(float x, float y, float speed)
     Particle p;
     p.x = x;
     p.y = y;
+    //The speed here works as such - cos gives us x part of speed, sin gives us y.  Combined gives us the direction and full speed.
+    //Using trig will let us preserve speed properly since cos² + sin² = 1
     p.dx = cosf(angle) * speed;
     p.dy = sinf(angle) * speed;
     p.heat = 255;
