@@ -10,6 +10,7 @@
 #include <windowsx.h>
 
 #include "particle.h"
+#include "Resource.h"
 
 // ------------------------------------------------------------
 // Backbuffer (what we DISPLAY): 32-bit pixels (0x00RRGGBB)
@@ -46,9 +47,12 @@ static int gMouseX = 1;
 static int gMouseY = 1;
 static bool mouseDown = false;
 
+// Control panel dialog
+static HWND gControlPanel = nullptr;
+
 // Fire tuning
-static const int DONTBURN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 2;   // how fast heat decays (bigger = faster fade)
+static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
+static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
 
 // ------------------------------------------------------------
 // Helper: build a simple "fire" palette.
@@ -323,10 +327,10 @@ static void RenderFire(HWND hwnd)
     // Note: We avoid the last row because we read "below" (y+1).
     // Also we skip a 1-pixel border (DONTBURN) to avoid left/right bounds.
     //
-    for (int y = DONTBURN; y < gH - DONTBURN - 1; y++)
+    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
     {
         uint8_t* line = gHeat + y * gW;
-        for (int x = DONTBURN; x < gW - DONTBURN; x++)
+        for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
         {
             int pixel =
                 (line[x] +                 // self
@@ -343,13 +347,92 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 3) Map heat -> RGB pixels using palette
+    // 3) Clear border pixels (not processed by diffusion, would accumulate heat)
+    // Why we're doing it this way: If we write our loops and particle handlers to
+    // handle the border, We'll have to write border-checking logic everywhere.  
+    // Setting the borders to 0 heat every frame is actually less calculations
+    // ----------------------------
+    for (int x = 0; x < gW; x++)
+    {
+        gHeat[x] = 0;                       // top row
+        gHeat[(gH - 1) * gW + x] = 0;      // bottom row
+    }
+    for (int y = 0; y < gH; y++)
+    {
+        gHeat[y * gW] = 0;                  // left column
+        gHeat[y * gW + (gW - 1)] = 0;       // right column
+    }
+
+    // ----------------------------
+    // 4) Map heat -> RGB pixels using palette
     // ----------------------------
     // Each frame we "paint" the heat field into the visible pixel buffer.
     for (int i = 0; i < gW * gH; i++)
     {
         pixelMem[i] = gPalette[gHeat[i]];
     }
+}
+
+// ------------------------------------------------------------
+// Control panel dialog procedure
+// ------------------------------------------------------------
+INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        // Set default particle count
+        SetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, 2000, FALSE);
+
+        // Populate palette dropdown
+        HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_PALETTE);
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Green");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Red");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Blue");
+        SendMessage(hCombo, CB_SETCURSEL, 0, 0);  // select first item
+
+        // Check bounce by default
+        CheckDlgButton(hDlg, IDC_CHECK_BOUNCE, BST_CHECKED);
+
+        // Set controls reference text
+        SetDlgItemText(hDlg, IDC_CONTROLSTEXT,
+            L"Space: Freeze\r\n"
+            L"Enter: Comet\r\n"
+            L"Backspace: Emit\r\n"
+            L"Left Mouse: Follow Pointer\r\n"
+            L"Right Mouse: Explosion");
+
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+    {
+        int controlId = LOWORD(wParam);
+        int notifyCode = HIWORD(wParam);
+
+        if (controlId == IDC_COMBO_PALETTE && notifyCode == CBN_SELCHANGE)
+        {
+            // Palette changed - rebuild palette
+            // TODO: hook up palette switching
+        }
+
+        if (controlId == IDC_CHECK_BOUNCE && notifyCode == BN_CLICKED)
+        {
+            // Bounce toggled
+            // TODO: hook up bounce toggle
+        }
+
+        return TRUE;
+    }
+
+    case WM_CLOSE:
+        // Hide instead of destroy - user can reopen later
+        ShowWindow(hDlg, SW_HIDE);
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -482,9 +565,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
 
     ShowWindow(hwnd, nCmdShow);
 
+    // Create modeless control panel dialog
+    gControlPanel = CreateDialog(hInstance, MAKEINTRESOURCE(IDD_CONTROLPANEL), hwnd, ControlPanelProc);
+    if (gControlPanel)
+    {
+        ShowWindow(gControlPanel, SW_SHOW);
+    }
+
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0))
     {
+        // Let the dialog process its own messages (tab, keyboard, etc.)
+        if (gControlPanel && IsDialogMessage(gControlPanel, &msg))
+            continue;
+
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
