@@ -40,7 +40,7 @@ static float userSpeedMultiplier = 1.0f;            // for future UI control
 
 // Particle system
 static std::vector<Particle> particles;
-static const int INITIAL_PARTICLE_RESERVE = 100000;
+static const int INITIAL_PARTICLE_RESERVE = 2000;
 
 // Mouse coordinates stored in WINDOW client space (not buffer space)
 static int gMouseX = 1;
@@ -53,6 +53,7 @@ static HWND gControlPanel = nullptr;
 // Fire tuning
 static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
 static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
+static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
 // ------------------------------------------------------------
 // Helper: build a simple "fire" palette.
@@ -210,10 +211,11 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
         int ix = (int)(x0 + dx * t);
         int iy = (int)(y0 + dy * t);
 
-        // Deposit heat in a small area
-        for (int oy = -1; oy <= 1; oy++)
+        // Deposit heat in a square around this point
+        int half = particleSize / 2;
+        for (int oy = -half; oy < particleSize - half; oy++)
         {
-            for (int ox = -1; ox <= 1; ox++)
+            for (int ox = -half; ox < particleSize - half; ox++)
             {
                 int hx = ix + ox;
                 int hy = iy + oy;

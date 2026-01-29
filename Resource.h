@@ -20,9 +20,7 @@
 #define IDC_CHECK_GRAVITY               1004
 #define IDC_COMBO_RESOLUTION            1007
 #define IDC_CHECK_FULLSCREEN            1008
-#define IDC_INFO                        1017
 #define IDC_INFO_GROUP                  1017
-#define IDC_INFO2                       1021
 #define IDC_CONTROLS_GROUP              1021
 #define IDRESOLUTIONGROUP               1022
 #define IDCOLORGROUP                    1023
