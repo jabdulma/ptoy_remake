@@ -8,6 +8,8 @@
 #include <random>
 #include <vector>
 #include <windowsx.h>
+#include <intrin.h>
+#include <immintrin.h>
 
 #include "particle.h"
 #include "Resource.h"
@@ -54,6 +56,25 @@ static HWND gControlPanel = nullptr;
 static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
 static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
+
+// SIMD toggle - set to true to use SSE2 diffusion, false for scalar
+static bool useSIMD = true;
+
+// Function pointer type for diffusion implementations
+using DiffusionFunc = void(*)();
+static void DiffuseScalar();
+static void DiffuseSSE2();
+static DiffusionFunc diffuseHeat = DiffuseScalar;
+
+// ------------------------------------------------------------
+// CPU feature detection
+// ------------------------------------------------------------
+static bool HasSSE2()
+{
+    int cpuInfo[4];
+    __cpuid(cpuInfo, 1);
+    return (cpuInfo[3] & (1 << 26)) != 0;  // EDX bit 26 = SSE2
+}
 
 // FPS tracking
 static LARGE_INTEGER fpsFrequency = {};    // ticks per second
@@ -150,6 +171,12 @@ static void InitBackbuffer(HWND hwnd)
     // Initialize FPS timer
     QueryPerformanceFrequency(&fpsFrequency);
     QueryPerformanceCounter(&fpsLastTime);
+
+    // Set diffusion method based on toggle and CPU capability
+    if (useSIMD && HasSSE2())
+        diffuseHeat = DiffuseSSE2;
+    else
+        diffuseHeat = DiffuseScalar;
 }
 
 // ------------------------------------------------------------
@@ -284,6 +311,106 @@ static void UpdateParticles()
 }
 
 // ------------------------------------------------------------
+// DiffuseScalar: original heat diffusion (one pixel at a time)
+// ------------------------------------------------------------
+static void DiffuseScalar()
+{
+    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
+    {
+        uint8_t* line = gHeat + y * gW;
+        for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
+        {
+            int pixel =
+                (line[x] +                 // self
+                    line[x - 1] +             // left
+                    line[x + 1] +             // right
+                    line[x + gW])             // below (same x, next row)
+                >> 2;                      // divide by 4
+
+            pixel -= BURNFADE;             // fade out
+
+            // Clamp to 0..255
+            line[x] = (pixel < 0) ? 0 : (uint8_t)pixel;
+        }
+    }
+}
+
+// ------------------------------------------------------------
+// DiffuseSSE2: SIMD heat diffusion (16 pixels at a time)
+// Same algorithm as scalar: avg(self, left, right, below) - fade
+// Processes 16 pixels per iteration using 128-bit SSE2 registers.
+// Because adding 4 bytes can overflow uint8, we unpack to 16-bit,
+// do the math, then pack back to 8-bit.
+// ------------------------------------------------------------
+static void DiffuseSSE2()
+{
+    __m128i zero = _mm_setzero_si128();
+    __m128i fade = _mm_set1_epi16((short)BURNFADE);
+
+    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
+    {
+        uint8_t* line = gHeat + y * gW;
+        int x = BORDER_MARGIN;
+
+        // Process 16 pixels at a time
+        // We need x-1 and x+1, so we stop 16 pixels before the right border
+        int xEnd = gW - BORDER_MARGIN - 16;
+
+        for (; x <= xEnd; x += 16)
+        {
+            // Load 16 bytes for each neighbor
+            __m128i self  = _mm_loadu_si128((__m128i*)&line[x]);
+            __m128i left  = _mm_loadu_si128((__m128i*)&line[x - 1]);
+            __m128i right = _mm_loadu_si128((__m128i*)&line[x + 1]);
+            __m128i below = _mm_loadu_si128((__m128i*)&line[x + gW]);
+
+            // Unpack low 8 bytes to 16-bit (prevents overflow during addition)
+            __m128i self_lo  = _mm_unpacklo_epi8(self, zero);
+            __m128i left_lo  = _mm_unpacklo_epi8(left, zero);
+            __m128i right_lo = _mm_unpacklo_epi8(right, zero);
+            __m128i below_lo = _mm_unpacklo_epi8(below, zero);
+
+            // Unpack high 8 bytes to 16-bit
+            __m128i self_hi  = _mm_unpackhi_epi8(self, zero);
+            __m128i left_hi  = _mm_unpackhi_epi8(left, zero);
+            __m128i right_hi = _mm_unpackhi_epi8(right, zero);
+            __m128i below_hi = _mm_unpackhi_epi8(below, zero);
+
+            // Sum the 4 neighbors (16-bit, no overflow possible)
+            __m128i sum_lo = _mm_add_epi16(self_lo, left_lo);
+            sum_lo = _mm_add_epi16(sum_lo, right_lo);
+            sum_lo = _mm_add_epi16(sum_lo, below_lo);
+
+            __m128i sum_hi = _mm_add_epi16(self_hi, left_hi);
+            sum_hi = _mm_add_epi16(sum_hi, right_hi);
+            sum_hi = _mm_add_epi16(sum_hi, below_hi);
+
+            // Divide by 4 (shift right by 2)
+            sum_lo = _mm_srli_epi16(sum_lo, 2);
+            sum_hi = _mm_srli_epi16(sum_hi, 2);
+
+            // Subtract BURNFADE with unsigned saturation (clamps to 0 automatically)
+            sum_lo = _mm_subs_epu16(sum_lo, fade);
+            sum_hi = _mm_subs_epu16(sum_hi, fade);
+
+            // Pack 16-bit back to 8-bit with unsigned saturation
+            __m128i result = _mm_packus_epi16(sum_lo, sum_hi);
+
+            // Store 16 result pixels
+            _mm_storeu_si128((__m128i*)&line[x], result);
+        }
+
+        // Handle remaining pixels with scalar code
+        for (; x < gW - BORDER_MARGIN; x++)
+        {
+            int pixel = (line[x] + line[x - 1] + line[x + 1] + line[x + gW]) >> 2;
+            pixel -= BURNFADE;
+            line[x] = (pixel < 0) ? 0 : (uint8_t)pixel;
+        }
+    }
+}
+
+// ------------------------------------------------------------
 // RenderFire: 1) inject heat (mouse) 2) update heat 3) map heat->pixels
 // IMPORTANT: This updates gHeat in place (like Seumas' sample).
 // ------------------------------------------------------------
@@ -330,32 +457,9 @@ static void RenderFire(HWND hwnd)
     UpdateParticles();
 
     // ----------------------------
-    // 2) Update heat using Seumas' "mutated box filter"
-    //    average: self + left + right + below, then fade, write back.
-    //    (Ignore pixel above -> effect "moves" upward.)
+    // 2) Update heat using active diffusion method (scalar or SIMD)
     // ----------------------------
-    //
-    // Note: We avoid the last row because we read "below" (y+1).
-    // Also we skip a 1-pixel border (DONTBURN) to avoid left/right bounds.
-    //
-    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
-    {
-        uint8_t* line = gHeat + y * gW;
-        for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
-        {
-            int pixel =
-                (line[x] +                 // self
-                    line[x - 1] +             // left
-                    line[x + 1] +             // right
-                    line[x + gW])             // below (same x, next row)
-                >> 2;                      // divide by 4
-
-            pixel -= BURNFADE;             // fade out
-
-            // Clamp to 0..255
-            line[x] = (pixel < 0) ? 0 : (uint8_t)pixel;
-        }
-    }
+    diffuseHeat();
 
     // ----------------------------
     // 3) Clear border pixels (not processed by diffusion, would accumulate heat)
