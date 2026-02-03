@@ -55,6 +55,11 @@ static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds iss
 static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
+// FPS tracking
+static LARGE_INTEGER fpsFrequency = {};    // ticks per second
+static LARGE_INTEGER fpsLastTime = {};     // last time we updated FPS display
+static int fpsFrameCount = 0;             // frames since last update
+
 // ------------------------------------------------------------
 // Helper: build a simple "fire" palette.
 // heat 0   -> black
@@ -141,6 +146,10 @@ static void InitBackbuffer(HWND hwnd)
 
     // Reserve space for particles (avoids reallocation during normal use)
     particles.reserve(INITIAL_PARTICLE_RESERVE);
+
+    // Initialize FPS timer
+    QueryPerformanceFrequency(&fpsFrequency);
+    QueryPerformanceCounter(&fpsLastTime);
 }
 
 // ------------------------------------------------------------
@@ -372,6 +381,23 @@ static void RenderFire(HWND hwnd)
     for (int i = 0; i < gW * gH; i++)
     {
         pixelMem[i] = gPalette[gHeat[i]];
+    }
+
+    // ----------------------------
+    // 5) Update FPS counter
+    // ----------------------------
+    fpsFrameCount++;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double elapsed = (double)(now.QuadPart - fpsLastTime.QuadPart) / fpsFrequency.QuadPart;
+    if (elapsed >= 1.0)
+    {
+        if (gControlPanel)
+        {
+            SetDlgItemInt(gControlPanel, IDC_FPSLIVE, fpsFrameCount, FALSE);
+        }
+        fpsFrameCount = 0;
+        fpsLastTime = now;
     }
 }
 
