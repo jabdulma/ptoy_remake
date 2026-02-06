@@ -58,7 +58,8 @@ static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
-static bool useSIMD = true;
+// TODO: Add this into the dialog box.
+static bool useSIMD = false;
 
 // Function pointer type for diffusion implementations
 using DiffusionFunc = void(*)();
@@ -356,13 +357,28 @@ static void DiffuseSSE2()
         // We need x-1 and x+1, so we stop 16 pixels before the right border
         int xEnd = gW - BORDER_MARGIN - 16;
 
+        //Note the 16 here, we're going through 16 bytes of memory at a time instead of one
         for (; x <= xEnd; x += 16)
         {
             // Load 16 bytes for each neighbor
+            /*
+                Lots to unpack (pun not intended) here:
+                __m128i is a 128-bit integer register variable, we're going to load our ints from the line array into this
+                _mm_loadu_si128 function, loads what we cast as a __m128i into the variable
+                &line[x] - "address of line[x]" - a uint8_t* pointer
+                Note that the & means "address of" - we're not getting the value.
+            */
+
             __m128i self  = _mm_loadu_si128((__m128i*)&line[x]);
             __m128i left  = _mm_loadu_si128((__m128i*)&line[x - 1]);
             __m128i right = _mm_loadu_si128((__m128i*)&line[x + 1]);
             __m128i below = _mm_loadu_si128((__m128i*)&line[x + gW]);
+
+            /*
+                We're going to "space out" the 8-bit values into 16-bit values, going for "low and high"
+                parts of the register.  Low and high being the first 8 8-bit values, and high being the last.
+                We're doing this so we can add above 255.  Which is done with _mm_add_epi16 below.
+            */
 
             // Unpack low 8 bytes to 16-bit (prevents overflow during addition)
             __m128i self_lo  = _mm_unpacklo_epi8(self, zero);
@@ -385,13 +401,26 @@ static void DiffuseSSE2()
             sum_hi = _mm_add_epi16(sum_hi, right_hi);
             sum_hi = _mm_add_epi16(sum_hi, below_hi);
 
+            /*
+                Just like in the normal version, we use bit-shifting to divide by four.
+                This technically loses some precision but doesn't affect the output in a
+                way that matters to the naked eye.  Who will notice a single pixel off by
+                a degree at 100+ fps?
+            */
+
             // Divide by 4 (shift right by 2)
             sum_lo = _mm_srli_epi16(sum_lo, 2);
             sum_hi = _mm_srli_epi16(sum_hi, 2);
 
+            // We subtract here.  "Saturation" means we stop at the maximum or minimum.
+            // So we'll safely stay at 0 if we get that low.
+
             // Subtract BURNFADE with unsigned saturation (clamps to 0 automatically)
             sum_lo = _mm_subs_epu16(sum_lo, fade);
             sum_hi = _mm_subs_epu16(sum_hi, fade);
+
+            // We re-pack, and same here we have saturation - so if somehow we had a number
+            // too high (not really possible with this math, but still) it'll clamp at 255.
 
             // Pack 16-bit back to 8-bit with unsigned saturation
             __m128i result = _mm_packus_epi16(sum_lo, sum_hi);
@@ -400,6 +429,9 @@ static void DiffuseSSE2()
             _mm_storeu_si128((__m128i*)&line[x], result);
         }
 
+        //That's the end of the SSE2 faster code!  It's really neat that it can be done this way.
+
+        // This handles the "leftover" pixels.  Anything that doesn't divide by 16 goes here.
         // Handle remaining pixels with scalar code
         for (; x < gW - BORDER_MARGIN; x++)
         {
