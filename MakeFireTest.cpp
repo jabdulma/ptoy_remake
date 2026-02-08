@@ -37,8 +37,8 @@ static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f); // ±1
 static std::uniform_real_distribution<float> chance(0.0f, 1.0f);          // for percentage rolls
 
 // Speed as fraction of screen width per frame (resolution-independent)
-static const float PARTICLE_SPEED_FACTOR = 0.004f;  // 0.4% of screen width per frame
-static float userSpeedMultiplier = 1.0f;            // for future UI control
+static const float PARTICLE_SPEED_FACTOR = 0.002f;  // 0.4% of screen width per frame
+static float userSpeedMultiplier = 0.5f;            // for future UI control
 
 // Particle system
 static std::vector<Particle> particles;
@@ -54,7 +54,7 @@ static HWND gControlPanel = nullptr;
 
 // Fire tuning
 static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 3;   // how fast heat decays (bigger = faster fade)
+static const int BURNFADE = 6;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
@@ -194,7 +194,7 @@ static void EmitParticle(float x, float y, float speed)
     //Using trig will let us preserve speed properly since cos² + sin² = 1
     p.dx = cosf(angle) * speed;
     p.dy = sinf(angle) * speed;
-    p.heat = 255;
+    p.heat = 180 + (dist(rng) % 76);  // range 180-255 for variation
     p.color = 0x00FFFFFF;  // white for now
     p.active = true;
 
@@ -312,33 +312,36 @@ static void UpdateParticles()
 }
 
 // ------------------------------------------------------------
-// DiffuseScalar: original heat diffusion (one pixel at a time)
+// DiffuseScalar: heat diffusion (one pixel at a time)
+// Heat rises by reading from above and writing result upward.
+// Loop runs top-to-bottom so we never read rows we've already written.
 // ------------------------------------------------------------
 static void DiffuseScalar()
 {
-    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
+    // Start one row down from top border, go to bottom
+    for (int y = BORDER_MARGIN + 1; y < gH - BORDER_MARGIN; y++)
     {
-        uint8_t* line = gHeat + y * gW;
+        uint8_t* row = gHeat + y * gW;
+        uint8_t* rowAbove = row - gW;
+
         for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
         {
-            int pixel =
-                (line[x] +                 // self
-                    line[x - 1] +             // left
-                    line[x + 1] +             // right
-                    line[x + gW])             // below (same x, next row)
-                >> 2;                      // divide by 4
+            // Sum the 4 neighbors: above, left, self, right
+            int sum = rowAbove[x] + row[x - 1] + row[x] + row[x + 1];
 
-            pixel -= BURNFADE;             // fade out
+            // Subtract fade BEFORE dividing (slower fade, more persistent fire)
+            int result = (sum - BURNFADE) >> 2;
 
-            // Clamp to 0..255
-            line[x] = (pixel < 0) ? 0 : (uint8_t)pixel;
+            // Clamp and write to the row above (heat rises)
+            rowAbove[x] = (result < 0) ? 0 : (uint8_t)result;
         }
     }
 }
 
 // ------------------------------------------------------------
 // DiffuseSSE2: SIMD heat diffusion (16 pixels at a time)
-// Same algorithm as scalar: avg(self, left, right, below) - fade
+// Same algorithm as scalar: avg(above, left, self, right)
+// then minus fade and divide by 4.
 // Processes 16 pixels per iteration using 128-bit SSE2 registers.
 // Because adding 4 bytes can overflow uint8, we unpack to 16-bit,
 // do the math, then pack back to 8-bit.
@@ -348,13 +351,15 @@ static void DiffuseSSE2()
     __m128i zero = _mm_setzero_si128();
     __m128i fade = _mm_set1_epi16((short)BURNFADE);
 
-    for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN - 1; y++)
+    // Start one row down from top border, go to bottom
+    for (int y = BORDER_MARGIN + 1; y < gH - BORDER_MARGIN; y++)
     {
-        uint8_t* line = gHeat + y * gW;
+        uint8_t* row = gHeat + y * gW;
+        uint8_t* rowAbove = row - gW;
         int x = BORDER_MARGIN;
 
         // Process 16 pixels at a time
-        // We need x-1 and x+1, so we stop 16 pixels before the right border
+        // We need x-1 and x+1, so stop 16 pixels before right border
         int xEnd = gW - BORDER_MARGIN - 16;
 
         //Note the 16 here, we're going through 16 bytes of memory at a time instead of one
@@ -363,16 +368,15 @@ static void DiffuseSSE2()
             // Load 16 bytes for each neighbor
             /*
                 Lots to unpack (pun not intended) here:
-                __m128i is a 128-bit integer register variable, we're going to load our ints from the line array into this
+                __m128i is a 128-bit integer register variable, we're going to load our ints from the row array into it
                 _mm_loadu_si128 function, loads what we cast as a __m128i into the variable
-                &line[x] - "address of line[x]" - a uint8_t* pointer
+                &row[x] - "address of row[x]" - a uint8_t* pointer
                 Note that the & means "address of" - we're not getting the value.
             */
-
-            __m128i self  = _mm_loadu_si128((__m128i*)&line[x]);
-            __m128i left  = _mm_loadu_si128((__m128i*)&line[x - 1]);
-            __m128i right = _mm_loadu_si128((__m128i*)&line[x + 1]);
-            __m128i below = _mm_loadu_si128((__m128i*)&line[x + gW]);
+            __m128i above = _mm_loadu_si128((__m128i*)&rowAbove[x]);
+            __m128i left  = _mm_loadu_si128((__m128i*)&row[x - 1]);
+            __m128i self  = _mm_loadu_si128((__m128i*)&row[x]);
+            __m128i right = _mm_loadu_si128((__m128i*)&row[x + 1]);
 
             /*
                 We're going to "space out" the 8-bit values into 16-bit values, going for "low and high"
@@ -381,25 +385,32 @@ static void DiffuseSSE2()
             */
 
             // Unpack low 8 bytes to 16-bit (prevents overflow during addition)
-            __m128i self_lo  = _mm_unpacklo_epi8(self, zero);
+            __m128i above_lo = _mm_unpacklo_epi8(above, zero);
             __m128i left_lo  = _mm_unpacklo_epi8(left, zero);
+            __m128i self_lo  = _mm_unpacklo_epi8(self, zero);
             __m128i right_lo = _mm_unpacklo_epi8(right, zero);
-            __m128i below_lo = _mm_unpacklo_epi8(below, zero);
 
             // Unpack high 8 bytes to 16-bit
-            __m128i self_hi  = _mm_unpackhi_epi8(self, zero);
+            __m128i above_hi = _mm_unpackhi_epi8(above, zero);
             __m128i left_hi  = _mm_unpackhi_epi8(left, zero);
+            __m128i self_hi  = _mm_unpackhi_epi8(self, zero);
             __m128i right_hi = _mm_unpackhi_epi8(right, zero);
-            __m128i below_hi = _mm_unpackhi_epi8(below, zero);
 
-            // Sum the 4 neighbors (16-bit, no overflow possible)
-            __m128i sum_lo = _mm_add_epi16(self_lo, left_lo);
+            // Sum the 4 neighbors (16-bit addition, we can't overflow)
+            __m128i sum_lo = _mm_add_epi16(above_lo, left_lo);
+            sum_lo = _mm_add_epi16(sum_lo, self_lo);
             sum_lo = _mm_add_epi16(sum_lo, right_lo);
-            sum_lo = _mm_add_epi16(sum_lo, below_lo);
 
-            __m128i sum_hi = _mm_add_epi16(self_hi, left_hi);
+            __m128i sum_hi = _mm_add_epi16(above_hi, left_hi);
+            sum_hi = _mm_add_epi16(sum_hi, self_hi);
             sum_hi = _mm_add_epi16(sum_hi, right_hi);
-            sum_hi = _mm_add_epi16(sum_hi, below_hi);
+
+            // We subtract here.  "Saturation" means we stop at the maximum or minimum.
+            // So we'll safely stay at 0 if we get that low.
+
+            // Using saturating subtract so we clamp at 0 automatically
+            sum_lo = _mm_subs_epu16(sum_lo, fade);
+            sum_hi = _mm_subs_epu16(sum_hi, fade);
 
             /*
                 Just like in the normal version, we use bit-shifting to divide by four.
@@ -407,37 +418,25 @@ static void DiffuseSSE2()
                 way that matters to the naked eye.  Who will notice a single pixel off by
                 a degree at 100+ fps?
             */
-
-            // Divide by 4 (shift right by 2)
             sum_lo = _mm_srli_epi16(sum_lo, 2);
             sum_hi = _mm_srli_epi16(sum_hi, 2);
 
-            // We subtract here.  "Saturation" means we stop at the maximum or minimum.
-            // So we'll safely stay at 0 if we get that low.
-
-            // Subtract BURNFADE with unsigned saturation (clamps to 0 automatically)
-            sum_lo = _mm_subs_epu16(sum_lo, fade);
-            sum_hi = _mm_subs_epu16(sum_hi, fade);
 
             // We re-pack, and same here we have saturation - so if somehow we had a number
             // too high (not really possible with this math, but still) it'll clamp at 255.
-
-            // Pack 16-bit back to 8-bit with unsigned saturation
+            // (Or 0)
             __m128i result = _mm_packus_epi16(sum_lo, sum_hi);
 
-            // Store 16 result pixels
-            _mm_storeu_si128((__m128i*)&line[x], result);
+            // Store result to the row ABOVE so the heat rises
+            _mm_storeu_si128((__m128i*)&rowAbove[x], result);
         }
 
-        //That's the end of the SSE2 faster code!  It's really neat that it can be done this way.
-
-        // This handles the "leftover" pixels.  Anything that doesn't divide by 16 goes here.
-        // Handle remaining pixels with scalar code
+        // Handle leftover pixels that don't fit in a 16-byte chunk
         for (; x < gW - BORDER_MARGIN; x++)
         {
-            int pixel = (line[x] + line[x - 1] + line[x + 1] + line[x + gW]) >> 2;
-            pixel -= BURNFADE;
-            line[x] = (pixel < 0) ? 0 : (uint8_t)pixel;
+            int sum = rowAbove[x] + row[x - 1] + row[x] + row[x + 1];
+            int result = (sum - BURNFADE) >> 2;
+            rowAbove[x] = (result < 0) ? 0 : (uint8_t)result;
         }
     }
 }
@@ -511,7 +510,16 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 4) Map heat -> RGB pixels using palette
+    // 4) Seed bottom row with random heat for ambient fire
+    // ----------------------------
+    uint8_t* bottomRow = gHeat + (gH - 2) * gW;  // second-to-last row (last row is border)
+    for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
+    {
+        bottomRow[x] = dist(rng);  // random 0-255
+    }
+
+    // ----------------------------
+    // 5) Map heat -> RGB pixels using palette
     // ----------------------------
     // Each frame we "paint" the heat field into the visible pixel buffer.
     for (int i = 0; i < gW * gH; i++)
@@ -520,7 +528,7 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 5) Update FPS counter
+    // 6) Update FPS counter
     // ----------------------------
     fpsFrameCount++;
     LARGE_INTEGER now;
@@ -693,6 +701,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_KEYDOWN:
+    {
+        if (wParam == VK_SPACE)
+        {
+            // Freeze all particles
+            for (size_t i = 0; i < particles.size(); i++)
+            {
+                particles[i].dx = 0;
+                particles[i].dy = 0;
+            }
+        }
+        return 0;
+    }
+
     case WM_CANCELMODE:
     case WM_KILLFOCUS:
         ReleaseCapture();
@@ -718,12 +740,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
 
     RegisterClass(&wc);
 
+    // Calculate window size needed for desired client area (1600x1200)
+    // Without this, the title bar and borders eat into our client space
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    RECT rc = { 0, 0, gW, gH };
+    AdjustWindowRectEx(&rc, style, FALSE, 0);
+    int windowWidth = rc.right - rc.left;
+    int windowHeight = rc.bottom - rc.top;
+
     HWND hwnd = CreateWindowEx(
         0,
         cls,
         L"Particle Toy: Remake - Have fun!",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1600, 1200,
+        style,
+        CW_USEDEFAULT, CW_USEDEFAULT, windowWidth, windowHeight,
         nullptr, nullptr, hInstance, nullptr
     );
 
