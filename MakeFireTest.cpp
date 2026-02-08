@@ -197,6 +197,7 @@ static void EmitParticle(float x, float y, float speed)
     p.heat = 180 + (dist(rng) % 76);  // range 180-255 for variation
     p.color = 0x00FFFFFF;  // white for now
     p.active = true;
+    p.leaderIdx = -1;     // no leader assigned
 
     particles.push_back(p);
 }
@@ -262,6 +263,50 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
                 }
             }
         }
+    }
+}
+
+// Attraction steering: how fast particles turn toward their target (0.0 = no turn, 1.0 = instant)
+static const float STEER_RATE = 0.05f;
+static const float PI = 3.14159265f;
+
+// ------------------------------------------------------------
+// SteerParticles: rotate each particle's velocity toward the target point.
+// Preserves speed, only changes direction. Orbiting emerges naturally
+// because the turn rate is slow enough that particles overshoot.
+// ------------------------------------------------------------
+static void SteerParticles(float targetX, float targetY)
+{
+    for (size_t i = 0; i < particles.size(); i++)
+    {
+        Particle& p = particles[i];
+        if (!p.active) continue;
+
+        // Current speed
+        float speed = sqrtf(p.dx * p.dx + p.dy * p.dy);
+        if (speed < 0.001f) continue;  // skip stationary particles
+
+        // Angle from particle to target
+        float toTargetX = targetX - p.x;
+        float toTargetY = targetY - p.y;
+        float targetAngle = atan2f(toTargetY, toTargetX);
+
+        // Current velocity angle
+        float velAngle = atan2f(p.dy, p.dx);
+
+        // Angle difference (how far off are we from pointing at target)
+        float angleDiff = targetAngle - velAngle;
+
+        // Normalize to -PI..PI so we always turn the short way
+        if (angleDiff > PI) angleDiff -= PI * 2.0f;
+        if (angleDiff < -PI) angleDiff += PI * 2.0f;
+
+        // Turn a fraction toward the target
+        velAngle += angleDiff * STEER_RATE;
+
+        // Reconstruct velocity: same speed, new direction
+        p.dx = cosf(velAngle) * speed;
+        p.dy = sinf(velAngle) * speed;
     }
 }
 
@@ -483,7 +528,15 @@ static void RenderFire(HWND hwnd)
         }
 
     // ----------------------------
-    // 1b) Update particles - move them and deposit heat
+    // 1b) Steer particles toward cursor if mouse is held
+    // ----------------------------
+    if (mouseDown && !particles.empty())
+    {
+        SteerParticles((float)bx, (float)by);
+    }
+
+    // ----------------------------
+    // 1c) Update particles - move them and deposit heat
     // ----------------------------
     UpdateParticles();
 
@@ -668,11 +721,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_MOUSEMOVE:
     {
-        // If left button is held, update the injection point as you drag.
+        // Always track cursor position (needed for particle attraction target)
+        gMouseX = GET_X_LPARAM(lParam);
+        gMouseY = GET_Y_LPARAM(lParam);
         if (wParam & MK_LBUTTON)
         {
-            gMouseX = GET_X_LPARAM(lParam);
-            gMouseY = GET_Y_LPARAM(lParam);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
