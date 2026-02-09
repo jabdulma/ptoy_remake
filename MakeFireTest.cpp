@@ -307,6 +307,10 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
     }
 }
 
+// Bounce tuning
+static const float BOUNCE = 0.8f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
+static const float KICK_STRENGTH = 1.1f;    // max random perpendicular kick on bounce
+
 // Attraction steering: how fast particles turn toward their target (0.0 = no turn, 1.0 = instant)
 static const float STEER_RATE = 0.05f;
 static const float PI = 3.14159265f;
@@ -373,27 +377,31 @@ static void UpdateParticles()
         p.x += p.dx;
         p.y += p.dy;
 
-        // Bounce off walls
+        // Bounce off walls with energy loss and random perpendicular kick
         if (p.x < 0)
         {
             p.x = -p.x;
-            p.dx = -p.dx;
+            p.dx = fabsf(p.dx) * BOUNCE;
+            p.dy += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
         }
         else if (p.x >= gW)
         {
-            p.x = 2 * gW - p.x - 1;
-            p.dx = -p.dx;
+            p.x = 2.0f * gW - p.x - 1;
+            p.dx = -fabsf(p.dx) * BOUNCE;
+            p.dy += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
         }
 
         if (p.y < 0)
         {
             p.y = -p.y;
-            p.dy = -p.dy;
+            p.dy = fabsf(p.dy) * BOUNCE;
+            p.dx += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
         }
         else if (p.y >= gH)
         {
-            p.y = 2 * gH - p.y - 1;
-            p.dy = -p.dy;
+            p.y = 2.0f * gH - p.y - 1;
+            p.dy = -fabsf(p.dy) * BOUNCE;
+            p.dx += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
         }
 
         // Deposit heat along the line from previous to current position
@@ -835,6 +843,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // Freeze all particles
             for (size_t i = 0; i < particles.size(); i++)
             {
+                particles[i].dx = 0;
+                particles[i].dy = 0;
+            }
+        }
+        else if (wParam == VK_RETURN)
+        {
+            // Comet: all particles at same random position, same random direction
+            float cx = (float)(rng() % gW);
+            float cy = (float)(rng() % gH);
+            float angle = angleDist(rng);
+            float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+            float cdx = cosf(angle) * baseSpeed;
+            float cdy = sinf(angle) * baseSpeed;
+            for (size_t i = 0; i < particles.size(); i++)
+            {
+                particles[i].x = cx;
+                particles[i].y = cy;
+                particles[i].dx = cdx;
+                particles[i].dy = cdy;
+            }
+        }
+        else if (wParam == VK_BACK)
+        {
+            // Send all particles to center of buffer, stopped
+            float cx = gW * 0.5f;
+            float cy = gH * 0.5f;
+            for (size_t i = 0; i < particles.size(); i++)
+            {
+                particles[i].x = cx;
+                particles[i].y = cy;
                 particles[i].dx = 0;
                 particles[i].dy = 0;
             }
