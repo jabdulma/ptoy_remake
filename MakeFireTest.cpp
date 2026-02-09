@@ -61,6 +61,12 @@ static int particleSize = 2;          // deposit size in pixels (for future UI c
 // TODO: Add this into the dialog box.
 static bool useSIMD = false;
 
+// Sparkle effect - brightens random dark pixels along each row for shimmer
+// TODO: Add this as a toggle in the dialog box.
+static bool useSparkles = true;
+static const uint8_t SPARKLE_THRESHOLD = 40;  // only sparkle pixels darker than this
+static const uint8_t SPARKLE_BOOST = 80;      // how much to brighten
+
 // Function pointer type for diffusion implementations
 using DiffusionFunc = void(*)();
 static void DiffuseScalar();
@@ -81,6 +87,37 @@ static bool HasSSE2()
 static LARGE_INTEGER fpsFrequency = {};    // ticks per second
 static LARGE_INTEGER fpsLastTime = {};     // last time we updated FPS display
 static int fpsFrameCount = 0;             // frames since last update
+
+// Frame limiter
+// TODO: Add this as a toggle in the dialog box.
+static bool useFrameLimiter = false;
+static int gRefreshRate = 60;                       // detected monitor refresh rate
+static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
+static LARGE_INTEGER gLastFrameTime = {};           // when last frame completed
+
+// ------------------------------------------------------------
+// UpdateRefreshRate: detect current monitor's refresh rate.
+// Uses MonitorFromWindow to handle multi-monitor setups.
+// ------------------------------------------------------------
+static void UpdateRefreshRate(HWND hwnd)
+{
+    HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEX mi = {};
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfo(hMon, &mi);
+
+    DEVMODE dm = {};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettings(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+    {
+        gRefreshRate = dm.dmDisplayFrequency;
+    }
+    else
+    {
+        gRefreshRate = 60;  // safe fallback
+    }
+    gTargetFrameTime = 1.0 / (double)gRefreshRate;
+}
 
 // ------------------------------------------------------------
 // Helper: build a simple "fire" palette.
@@ -172,6 +209,10 @@ static void InitBackbuffer(HWND hwnd)
     // Initialize FPS timer
     QueryPerformanceFrequency(&fpsFrequency);
     QueryPerformanceCounter(&fpsLastTime);
+    QueryPerformanceCounter(&gLastFrameTime);
+
+    // Detect monitor refresh rate for frame limiter
+    UpdateRefreshRate(hwnd);
 
     // Set diffusion method based on toggle and CPU capability
     if (useSIMD && HasSSE2())
@@ -282,9 +323,13 @@ static void SteerParticles(float targetX, float targetY)
         Particle& p = particles[i];
         if (!p.active) continue;
 
-        // Current speed
+        // Current speed - if stationary, give an initial kick with variance
         float speed = sqrtf(p.dx * p.dx + p.dy * p.dy);
-        if (speed < 0.001f) continue;  // skip stationary particles
+        if (speed < 0.001f)
+        {
+            float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+            speed = baseSpeed * speedVariance(rng);
+        }
 
         // Angle from particle to target
         float toTargetX = targetX - p.x;
@@ -546,7 +591,24 @@ static void RenderFire(HWND hwnd)
     diffuseHeat();
 
     // ----------------------------
-    // 3) Clear border pixels (not processed by diffusion, would accumulate heat)
+    // 3) Sparkles: brighten one random dark pixel per row for shimmer effect
+    // ----------------------------
+    if (useSparkles)
+    {
+        for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN; y++)
+        {
+            int x = rng() % gW;
+            uint8_t& h = gHeat[y * gW + x];
+            if (h > 0 && h < SPARKLE_THRESHOLD)
+            {
+                int boosted = h + SPARKLE_BOOST;
+                h = (boosted > 255) ? 255 : (uint8_t)boosted;
+            }
+        }
+    }
+
+    // ----------------------------
+    // 4) Clear border pixels (not processed by diffusion, would accumulate heat)
     // Why we're doing it this way: If we write our loops and particle handlers to
     // handle the border, We'll have to write border-checking logic everywhere.  
     // Setting the borders to 0 heat every frame is actually less calculations
@@ -563,7 +625,7 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 4) Seed bottom row with random heat for ambient fire
+    // 5) Seed bottom row with random heat for ambient fire
     // ----------------------------
     uint8_t* bottomRow = gHeat + (gH - 2) * gW;  // second-to-last row (last row is border)
     for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
@@ -572,7 +634,7 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 5) Map heat -> RGB pixels using palette
+    // 6) Map heat -> RGB pixels using palette
     // ----------------------------
     // Each frame we "paint" the heat field into the visible pixel buffer.
     for (int i = 0; i < gW * gH; i++)
@@ -581,7 +643,7 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 6) Update FPS counter
+    // 7) Update FPS counter
     // ----------------------------
     fpsFrameCount++;
     LARGE_INTEGER now;
@@ -698,8 +760,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         EndPaint(hwnd, &ps);
 
-        // Simple animation driver: request another paint.
-        // (Later you can move this to a timer or a PeekMessage loop.)
+        // Frame limiter: spin-wait until target frame time has elapsed.
+        // Sleep is too coarse (15ms granularity), so we spin on QPC for precision.
+        if (useFrameLimiter)
+        {
+            LARGE_INTEGER now;
+            double elapsed;
+            do {
+                QueryPerformanceCounter(&now);
+                elapsed = (double)(now.QuadPart - gLastFrameTime.QuadPart) / fpsFrequency.QuadPart;
+            } while (elapsed < gTargetFrameTime);
+            gLastFrameTime = now;
+        }
+
+        // Request another paint to keep the render loop going
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
@@ -767,6 +841,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+
+    case WM_DISPLAYCHANGE:
+        // Monitor settings changed (resolution, refresh rate)
+        UpdateRefreshRate(hwnd);
+        return 0;
+
+    case WM_MOVE:
+        // Window moved - may be on a different monitor now
+        UpdateRefreshRate(hwnd);
+        return 0;
 
     case WM_CANCELMODE:
     case WM_KILLFOCUS:
