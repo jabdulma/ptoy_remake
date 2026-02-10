@@ -37,7 +37,7 @@ static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f); // ±1
 static std::uniform_real_distribution<float> chance(0.0f, 1.0f);          // for percentage rolls
 
 // Speed as fraction of screen width per frame (resolution-independent)
-static const float PARTICLE_SPEED_FACTOR = 0.002f;  // 0.4% of screen width per frame
+static const float PARTICLE_SPEED_FACTOR = 0.01f;  // 0.4% of screen width per frame
 static float userSpeedMultiplier = 0.5f;            // for future UI control
 
 // Particle system
@@ -54,12 +54,12 @@ static HWND gControlPanel = nullptr;
 
 // Fire tuning
 static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 6;   // how fast heat decays (bigger = faster fade)
+static const int BURNFADE = 4;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
 // TODO: Add this into the dialog box.
-static bool useSIMD = false;
+static bool useSIMD = true;
 
 // Sparkle effect - brightens random dark pixels along each row for shimmer
 // TODO: Add this as a toggle in the dialog box.
@@ -90,7 +90,12 @@ static int fpsFrameCount = 0;             // frames since last update
 
 // Frame limiter
 // TODO: Add this as a toggle in the dialog box.
-static bool useFrameLimiter = false;
+
+//A note about frame rate.  The particle fire screensaver is set to 25fps.
+//But particle toy runs smoother than that.  It's either 60fps, or the screen's
+//refresh rate.  We won't know with decompiling it... or doing some screen recording
+
+static bool useFrameLimiter = true;
 static int gRefreshRate = 60;                       // detected monitor refresh rate
 static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
 static LARGE_INTEGER gLastFrameTime = {};           // when last frame completed
@@ -119,41 +124,68 @@ static void UpdateRefreshRate(HWND hwnd)
     gTargetFrameTime = 1.0 / (double)gRefreshRate;
 }
 
+// Palette configuration
+// TODO: Add color scheme selector and nitro toggle to the dialog box.
+static bool useNitro = true;  // boost blue at high heat for white-hot effect
+
+// Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
+struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
+static const ColorScheme PALETTE_PRESETS[] = {
+    {   0, 255,   0,  255, 255,  55 },  // 0: Green Fire (our default)
+    { 255, 128,   0,  255, 255,   0 },  // 1: Fiery Orange (original default)
+    {   0, 128, 255,    0, 255, 255 },  // 2: Skyish Teal
+    {  64,  64, 128,  192, 192, 255 },  // 3: Velvet Blue
+    {  32, 128,  32,  160, 255, 160 },  // 4: Slimy Green
+    { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
+};
+static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
+static int currentPalette = 2;
+
 // ------------------------------------------------------------
-// Helper: build a simple "fire" palette.
-// heat 0   -> black
-// heat mid -> green
-// heat 255 -> white
+// BuildPalette: two-color spread palette with optional "nitro" boost.
+// 0-127:   black -> color1 (linear ramp)
+// 128-254: color1 -> color2 (linear interpolation)
+// 255:     forced white
+// Nitro:   adds blue channel ramp starting at index 200 for white-hot tips
 // ------------------------------------------------------------
-static void BuildFirePalette()
+static void BuildPalette(uint8_t r1, uint8_t g1, uint8_t b1,
+                         uint8_t r2, uint8_t g2, uint8_t b2)
 {
     for (int i = 0; i < 256; i++)
     {
-        // Piecewise: black -> green -> yellow -> white
-        int r = 0, g = 0, b = 0;
+        int r, g, b;
 
         if (i < 128)
         {
-            // 0..127: black -> green
-            r = 0;
-            g = i * 2;   // 0..254
-            b = 0;
+            // Black -> Color 1
+            float t = (float)i / 127.0f;
+            r = (int)(r1 * t);
+            g = (int)(g1 * t);
+            b = (int)(b1 * t);
         }
         else
         {
-            // 128..255: green -> yellow -> white-ish
-            g = 255;
-            r = (i - 128) * 2;         // 0..254
-            if (r > 255) r = 255;
+            // Color 1 -> Color 2
+            float t = (float)(i - 127) / 128.0f;
+            float it = 1.0f - t;
+            r = (int)(r1 * it + r2 * t);
+            g = (int)(g1 * it + g2 * t);
+            b = (int)(b1 * it + b2 * t);
+        }
 
-            // Add a little blue near the top end to approach white
-            b = (i - 200) * 4;         // starts turning on around 200
-            if (b < 0) b = 0;
+        // Nitro: boost blue near the top for white-hot intensity
+        if (useNitro && i >= 200)
+        {
+            int boost = (i - 200) * 4;
+            b = b + boost;
             if (b > 255) b = 255;
         }
 
         gPalette[i] = (uint32_t)((r << 16) | (g << 8) | (b));
     }
+
+    // Force index 255 to pure white
+    gPalette[255] = 0x00FFFFFF;
 }
 
 // ------------------------------------------------------------
@@ -200,8 +232,9 @@ static void InitBackbuffer(HWND hwnd)
     // Start cold (all zeros).
     ZeroMemory(gHeat, (size_t)gW * (size_t)gH);
 
-    // Build our heat->color palette.
-    BuildFirePalette();
+    // Build our heat->color palette from current scheme.
+    const ColorScheme& cs = PALETTE_PRESETS[currentPalette];
+    BuildPalette(cs.r1, cs.g1, cs.b1, cs.r2, cs.g2, cs.b2);
 
     // Reserve space for particles (avoids reallocation during normal use)
     particles.reserve(INITIAL_PARTICLE_RESERVE);
@@ -300,7 +333,8 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
                 int hy = iy + oy;
                 if ((unsigned)hx < (unsigned)gW && (unsigned)hy < (unsigned)gH)
                 {
-                    gHeat[hy * gW + hx] = heat;
+                    uint8_t& h = gHeat[hy * gW + hx];
+                    if (heat > h) h = heat;
                 }
             }
         }
@@ -308,8 +342,8 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
 }
 
 // Bounce tuning
-static const float BOUNCE = 0.8f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
-static const float KICK_STRENGTH = 1.1f;    // max random perpendicular kick on bounce
+static const float BOUNCE = 0.95f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
+static const float KICK_STRENGTH = 0.5f;    // max random perpendicular kick on bounce
 
 // Attraction steering: how fast particles turn toward their target (0.0 = no turn, 1.0 = instant)
 static const float STEER_RATE = 0.05f;
