@@ -59,7 +59,7 @@ static int particleSize = 2;          // deposit size in pixels (for future UI c
 
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
 // TODO: Add this into the dialog box.
-static bool useSIMD = true;
+static bool useSIMD = false;
 
 // Sparkle effect - brightens random dark pixels along each row for shimmer
 // TODO: Add this as a toggle in the dialog box.
@@ -95,7 +95,7 @@ static int fpsFrameCount = 0;             // frames since last update
 //But particle toy runs smoother than that.  It's either 60fps, or the screen's
 //refresh rate.  We won't know with decompiling it... or doing some screen recording
 
-static bool useFrameLimiter = true;
+static bool useFrameLimiter = false;
 static int gRefreshRate = 60;                       // detected monitor refresh rate
 static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
 static LARGE_INTEGER gLastFrameTime = {};           // when last frame completed
@@ -126,7 +126,7 @@ static void UpdateRefreshRate(HWND hwnd)
 
 // Palette configuration
 // TODO: Add color scheme selector and nitro toggle to the dialog box.
-static bool useNitro = true;  // boost blue at high heat for white-hot effect
+static bool useNitro = false;  // boost blue at high heat for white-hot effect
 
 // Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
 struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
@@ -139,7 +139,7 @@ static const ColorScheme PALETTE_PRESETS[] = {
     { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
 };
 static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
-static int currentPalette = 2;
+static int currentPalette = 0;
 
 // ------------------------------------------------------------
 // BuildPalette: two-color spread palette with optional "nitro" boost.
@@ -277,30 +277,24 @@ static void EmitParticle(float x, float y, float speed)
 }
 
 // ------------------------------------------------------------
-// EmitFirework: spawn many particles in all directions from a point
-// 90% get normal speed (with some variance), 10% get 40% speed (stragglers)
+// EmitFirework: spawn many particles in all directions from a point.
+// Each explosion gets a random max speed (50%-100% of base), and each
+// particle gets a random speed from 0 to that max. This creates a
+// filled disc rather than a ring, and each explosion feels different.
 // ------------------------------------------------------------
 static void EmitFirework(float x, float y, int count)
 {
     // Clear existing particles
     particles.clear();
 
-    // Calculate base speed from screen width (resolution-independent)
+    // Calculate base speed, then pick a random max for this explosion
     float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+    float maxSpeed = baseSpeed * (0.5f + chance(rng) * 0.5f);  // 50%-100% of base
 
     for (int i = 0; i < count; i++)
     {
-        float speed;
-        if (chance(rng) < 0.10f)
-        {
-            // 10% are slow stragglers (with variance)
-            speed = baseSpeed * 0.4f * speedVariance(rng);
-        }
-        else
-        {
-            // 90% get normal speed with ±15% variance
-            speed = baseSpeed * speedVariance(rng);
-        }
+        // Each particle gets a random speed from 0 to maxSpeed (filled disc)
+        float speed = chance(rng) * maxSpeed;
         EmitParticle(x, y, speed);
     }
 }
@@ -341,6 +335,13 @@ static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat
     }
 }
 
+// AltColor: particles fade per-frame and brighten on wall bounce
+// TODO: Add this as a toggle in the dialog box.
+static bool useAltColor = false;
+static const uint8_t HEAT_FADE = 1;         // heat lost per frame per particle
+static const uint8_t HEAT_FLOOR = 128;      // minimum heat (particles never go fully dark)
+static const uint8_t BOUNCE_BRIGHTEN = 32;  // heat gained on wall bounce
+
 // Bounce tuning
 static const float BOUNCE = 0.95f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
 static const float KICK_STRENGTH = 0.5f;    // max random perpendicular kick on bounce
@@ -361,12 +362,13 @@ static void SteerParticles(float targetX, float targetY)
         Particle& p = particles[i];
         if (!p.active) continue;
 
-        // Current speed - if stationary, give an initial kick with variance
+        // Current speed - if stationary, give a gentle initial kick.
+        // Much slower than explosion speed; just enough to get steering working.
+        // Original used gravity (0.1 px/frame) to build speed gradually.
         float speed = sqrtf(p.dx * p.dx + p.dy * p.dy);
         if (speed < 0.001f)
         {
-            float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
-            speed = baseSpeed * speedVariance(rng);
+            speed = 0.5f + chance(rng) * 0.5f;  // 0.5-1.0 px/frame
         }
 
         // Angle from particle to target
@@ -403,6 +405,12 @@ static void UpdateParticles()
         Particle& p = particles[i];
         if (!p.active) continue;
 
+        // AltColor: fade heat each frame, floor at HEAT_FLOOR
+        if (useAltColor && p.heat > HEAT_FLOOR)
+        {
+            p.heat = (p.heat - HEAT_FADE < HEAT_FLOOR) ? HEAT_FLOOR : p.heat - HEAT_FADE;
+        }
+
         // Store previous position
         float prevX = p.x;
         float prevY = p.y;
@@ -417,12 +425,14 @@ static void UpdateParticles()
             p.x = -p.x;
             p.dx = fabsf(p.dx) * BOUNCE;
             p.dy += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
+            if (useAltColor) p.heat = (p.heat + BOUNCE_BRIGHTEN > 254) ? 254 : p.heat + BOUNCE_BRIGHTEN;
         }
         else if (p.x >= gW)
         {
             p.x = 2.0f * gW - p.x - 1;
             p.dx = -fabsf(p.dx) * BOUNCE;
             p.dy += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
+            if (useAltColor) p.heat = (p.heat + BOUNCE_BRIGHTEN > 254) ? 254 : p.heat + BOUNCE_BRIGHTEN;
         }
 
         if (p.y < 0)
@@ -430,12 +440,14 @@ static void UpdateParticles()
             p.y = -p.y;
             p.dy = fabsf(p.dy) * BOUNCE;
             p.dx += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
+            if (useAltColor) p.heat = (p.heat + BOUNCE_BRIGHTEN > 254) ? 254 : p.heat + BOUNCE_BRIGHTEN;
         }
         else if (p.y >= gH)
         {
             p.y = 2.0f * gH - p.y - 1;
             p.dy = -fabsf(p.dy) * BOUNCE;
             p.dx += (chance(rng) * 2.0f - 1.0f) * KICK_STRENGTH;
+            if (useAltColor) p.heat = (p.heat + BOUNCE_BRIGHTEN > 254) ? 254 : p.heat + BOUNCE_BRIGHTEN;
         }
 
         // Deposit heat along the line from previous to current position
