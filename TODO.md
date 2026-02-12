@@ -38,3 +38,6 @@
 - [ ] **Performance on older machines** - Profile and test on lower-end hardware. SIMD toggle exists for this.
 - [ ] **Delta-time movement** - Decouple simulation speed from frame rate. Currently frame-rate dependent. Non-trivial change.
 - [ ] **Color cycling** - Original smoothly interpolates between color schemes over time. Cool screensaver-like effect.
+
+## Release 
+- [ ] **Release system / Git Actions ** - Create a git action to create a binary every time we release to master.
