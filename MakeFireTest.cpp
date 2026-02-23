@@ -74,6 +74,95 @@ static int particleSize = 2;          // deposit size in pixels (for future UI c
 // TODO: Add this into the dialog box.
 static bool useSIMD = false;
 
+// ------------------------------------------------------------
+// 2D value noise matching original's PerlinNoise (FUN_00404550)
+//
+// X = horizontal position across the bottom row (fixed per pixel)
+// Y = time phase, increments each frame — this is the "scroll" dimension
+//
+// Key differences from standard Perlin gradient noise:
+//   - Value noise: gradient table holds scalar values, not direction vectors
+//   - Smoothstep applied to Y only; X uses plain linear interpolation
+//   - Octave X progression: (coordX + 7) * 2  (shift prevents octave correlation)
+//   - Amplitude table and output scale confirmed from original binary
+// ------------------------------------------------------------
+static uint8_t gPerlinPerm[512];     // permutation table (doubled for wrapping)
+static double  gPerlinGrad[256];     // value noise table: random doubles in [0, 1]
+static double  gPerlinY = 0.0;       // Y phase, incremented each frame for animation
+static bool    usePerlinFire = false; // toggle: Perlin vs random-walk bottom row
+
+// Confirmed from original binary (FUN_00404550 / DAT_0040f4d8 / DAT_0040f510)
+static const double kPerlinAmp[7] = {
+    1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625
+};
+static const double kPerlinScale[7] = {
+    1.0,
+    0.6666666667,   // 1/1.5
+    0.5714285714,   // 1/1.75
+    0.5333333333,   // 1/1.875
+    0.5161290323,   // 1/1.9375
+    0.5081300813,   // 1/1.96875
+    0.5040322581,   // 1/1.984375
+};
+
+static void InitPerlinTable()
+{
+    uint8_t p[256];
+    for (int i = 0; i < 256; i++) p[i] = (uint8_t)i;
+    for (int i = 255; i > 0; i--)  // Fisher-Yates shuffle
+    {
+        int j = rng() % (i + 1);
+        uint8_t tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+    }
+    for (int i = 0; i < 512; i++)
+        gPerlinPerm[i] = p[i & 255];
+
+    std::uniform_real_distribution<double> d01(0.0, 1.0);
+    for (int i = 0; i < 256; i++)
+        gPerlinGrad[i] = d01(rng);
+}
+
+// 2D value noise, numOctaves in [0..6]
+static double PerlinNoise2D(double x, double y, int numOctaves)
+{
+    if (numOctaves < 0 || numOctaves >= 7) return 0.5;
+
+    const double* amp = kPerlinAmp;
+    double accumulated = 0.0;
+    double coordX      = x;
+    int    iters       = numOctaves + 1;
+
+    do {
+        int xi0 = (int)floor(coordX);
+        int xi1 = xi0 + 1;
+        double fracX = coordX - floor(coordX);
+
+        int    yi0    = (int)floor(y);
+        int    yi1    = yi0 + 1;
+        double fracY  = y - floor(y);
+        double smoothY = (3.0 - 2.0 * fracY) * fracY * fracY;  // smoothstep on Y only
+
+        // Hash the 4 cell corners through the permutation table
+        int hY0 = gPerlinPerm[yi0 & 255];
+        int hY1 = gPerlinPerm[yi1 & 255];
+        double gBL = gPerlinGrad[gPerlinPerm[(xi0 + hY0) & 255]];
+        double gBR = gPerlinGrad[gPerlinPerm[(xi1 + hY0) & 255]];
+        double gTL = gPerlinGrad[gPerlinPerm[(xi0 + hY1) & 255]];
+        double gTR = gPerlinGrad[gPerlinPerm[(xi1 + hY1) & 255]];
+
+        // Bilinear: linear on X, smoothstep on Y (matching original)
+        double top    = gTR * fracX + gTL * (1.0 - fracX);
+        double bottom = gBL * (1.0 - fracX) + gBR * fracX;
+        accumulated  += (top * smoothY + bottom * (1.0 - smoothY)) * (*amp++);
+
+        // Next octave: shift+double to avoid correlation between octaves
+        coordX = (coordX + 7.0) * 2.0;
+        iters--;
+    } while (iters != 0);
+
+    return kPerlinScale[numOctaves] * accumulated;
+}
+
 // Sparkle effect - brightens random dark pixels along each row for shimmer
 // TODO: Add this as a toggle in the dialog box.
 static bool useSparkles = true;
@@ -263,6 +352,9 @@ static void InitBackbuffer(HWND hwnd)
 
     // Calculate speed factor based on mode and resolution
     UpdateSpeedFactor();
+
+    // Initialize Perlin permutation table for flame base mode
+    InitPerlinTable();
 
     // Set diffusion method based on toggle and CPU capability
     if (useSIMD && HasSSE2())
@@ -700,18 +792,35 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 5) Seed bottom row with correlated random walk (matching original)
-    // Each pixel drifts ±32 from its left neighbor, producing a smooth wave-like flame base.
+    // 5) Seed bottom row: Perlin noise or correlated random walk
     // ----------------------------
     uint8_t* bottomRow = gHeat + (gH - 2) * gW;  // second-to-last row (last row is border)
+    if (usePerlinFire)
     {
-        int seed = dist(rng);  // random starting value
+        // Y increments each frame — this is the time/animation dimension.
+        // X = col * 0.03 matching original: ~33px per noise period, resolution-independent blobs.
+        gPerlinY += 0.05;
+
         for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
         {
-            // If existing pixel has heat, continue from it instead of the seed
+            double noise = PerlinNoise2D(x * 0.03, gPerlinY, 2);
+            // noise is in [0, 1]; map to [64, 255] matching original's +64 offset
+            int val = (int)(noise * 191.0 + 64.0);
+            if (val < 0)   val = 0;
+            if (val > 255) val = 255;
+            bottomRow[x] = (uint8_t)val;
+        }
+    }
+    else
+    {
+        // Correlated random walk: each pixel drifts ±32 from its left neighbor
+        // Produces smooth, wave-like flame base matching original mode 0
+        int seed = dist(rng);
+        for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
+        {
             if (bottomRow[x] != 0)
                 seed = bottomRow[x];
-            seed += (int)(dist(rng) % 65) - 32;  // drift ±32
+            seed += (int)(dist(rng) % 65) - 32;
             if (seed < 0) seed = 0;
             if (seed > 255) seed = 255;
             bottomRow[x] = (uint8_t)seed;
@@ -743,7 +852,7 @@ static void RenderFire(HWND hwnd)
         fpsFrameCount = 0;
         fpsLastTime = now;
     }
-    Sleep(1);
+    //Sleep(1);
 }
 
 // ------------------------------------------------------------
@@ -806,6 +915,11 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
                 diffuseHeat = DiffuseSSE2;
             else
                 diffuseHeat = DiffuseScalar;
+        }
+
+        if (controlId == IDC_PERLIN_FIRE && notifyCode == BN_CLICKED)
+        {
+            usePerlinFire = (IsDlgButtonChecked(hDlg, IDC_PERLIN_FIRE) == BST_CHECKED);
         }
 
         return TRUE;
