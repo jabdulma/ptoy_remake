@@ -92,8 +92,22 @@ for each x:
 ```
 
 **Mode 1 — Perlin Noise** (`FUN_00404550`):
-Uses 1D Perlin noise function, result offset by +64 (`+ '@'`).
-Produces smoother, more wave-like flame base.
+```c
+FUN_00404550(0x4c32f0, col * _DAT_00410048, _DAT_004100d8, 2, 0, 0);
+pixel[col] = (uint8)clamp((int)(result * 255) + 64, 0, 255);
+```
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| x | `col * 0.03` | Raw pixel column × hardcoded scale; 1 period per ~33px |
+| y | `_DAT_004100d8` | Scrolling Y phase, advances each frame |
+| numOctaves | `2` | 3 octave passes |
+| periodX | `0` | Infinite (no tiling) |
+| periodY | `0` | Infinite (no tiling) |
+| result offset | `+64` (`'@'`) | Shifts noise output up from baseline |
+
+At 320px wide: ~10 periods of flame tongues across the bottom row.
+`_DAT_00410048` (= 0.03) is a hardcoded data constant, not exposed in the dialog.
 
 ---
 
@@ -507,13 +521,15 @@ for each particle (+= 72 bytes):
 ```
 Confirms 72-byte particle stride from particle loop analysis.
 
-### Perlin Noise Object (FUN_00404550 — FUN_00404550)
+### Perlin Noise Object (FUN_00404550)
 Classic multi-octave Ken Perlin noise:
 - Object at `0x004c32f0`: permutation table at `+0x2050`, gradient table at `+0x50`
 - Octaves: 0–6 (returns 0.5 if out of range)
 - Smoothstep: `(3 - 2t) * t * t`
 - Period params: 0 = infinite; non-zero = tiled noise
-- Used for bottom row seeding in mode 1
+- Used for bottom row seeding in mode 1 with numOctaves=2, x=`col*0.03`, periodX=0, periodY=0
+- Amplitude table (`DAT_0040f4d8`): `1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625` (confirmed from binary)
+- Output scale table (`DAT_0040f510`): `1/partial_sum` per octave count (confirmed from binary)
 
 ---
 
