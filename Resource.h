@@ -18,8 +18,14 @@
 #define IDC_COMBO_PALETTE               1002
 #define IDC_CHECK_BOUNCE                1003
 #define IDC_CHECK_GRAVITY               1004
+#define IDC_CHECK_SIMD                  1005
+#define IDC_FOLLOWLEADER                1006
 #define IDC_COMBO_RESOLUTION            1007
 #define IDC_CHECK_FULLSCREEN            1008
+#define IDC_MULTILEADER                 1009
+#define IDC_PERLIN_FIRE                 1011
+#define IDC_CHECK_SIMD3                 1012
+#define IDC_CHECK_RANDEVENT             1012
 #define IDC_INFO_GROUP                  1017
 #define IDC_CONTROLS_GROUP              1021
 #define IDRESOLUTIONGROUP               1022

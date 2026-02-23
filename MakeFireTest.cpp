@@ -36,9 +36,22 @@ static std::uniform_real_distribution<float> angleDist(0.0f, 6.283185f);  // 0 t
 static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f); // ±15% speed variance
 static std::uniform_real_distribution<float> chance(0.0f, 1.0f);          // for percentage rolls
 
-// Speed as fraction of screen width per frame (resolution-independent)
-static const float PARTICLE_SPEED_FACTOR = 0.01f;  // 0.4% of screen width per frame
-static float userSpeedMultiplier = 0.5f;            // for future UI control
+// Speed system
+// TODO: Add original speed toggle and speed multiplier slider to the dialog box.
+static const float ORIGINAL_BASE_SPEED = 8.0f;         // original's ~8 px/frame at any resolution
+static const float DEFAULT_SPEED_FACTOR = 0.01f;        // resolution-independent default
+static float PARTICLE_SPEED_FACTOR = 0.01f;             // active speed factor (recalculated)
+static float userSpeedMultiplier = 0.5f;                 // user-adjustable slider
+static bool useOriginalSpeeds = false;                    // match original's absolute pixel speeds
+
+// Recalculate speed factor based on mode and current resolution
+static void UpdateSpeedFactor()
+{
+    if (useOriginalSpeeds)
+        PARTICLE_SPEED_FACTOR = ORIGINAL_BASE_SPEED / (gW * userSpeedMultiplier);
+    else
+        PARTICLE_SPEED_FACTOR = DEFAULT_SPEED_FACTOR;
+}
 
 // Particle system
 static std::vector<Particle> particles;
@@ -54,7 +67,7 @@ static HWND gControlPanel = nullptr;
 
 // Fire tuning
 static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 4;   // how fast heat decays (bigger = faster fade)
+static const int BURNFADE = 6;   // how fast heat decays (bigger = faster fade)
 static int particleSize = 2;          // deposit size in pixels (for future UI control)
 
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
@@ -64,8 +77,9 @@ static bool useSIMD = false;
 // Sparkle effect - brightens random dark pixels along each row for shimmer
 // TODO: Add this as a toggle in the dialog box.
 static bool useSparkles = true;
-static const uint8_t SPARKLE_THRESHOLD = 40;  // only sparkle pixels darker than this
-static const uint8_t SPARKLE_BOOST = 80;      // how much to brighten
+// Original thresholds: 32 < value < 128. Effect: double the value, spread to 4 neighbors.
+static const uint8_t SPARKLE_LOW  = 32;   // only sparkle pixels above this
+static const uint8_t SPARKLE_HIGH = 128;  // only sparkle pixels below this
 
 // Function pointer type for diffusion implementations
 using DiffusionFunc = void(*)();
@@ -139,7 +153,7 @@ static const ColorScheme PALETTE_PRESETS[] = {
     { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
 };
 static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
-static int currentPalette = 0;
+static int currentPalette = 1;
 
 // ------------------------------------------------------------
 // BuildPalette: two-color spread palette with optional "nitro" boost.
@@ -247,6 +261,9 @@ static void InitBackbuffer(HWND hwnd)
     // Detect monitor refresh rate for frame limiter
     UpdateRefreshRate(hwnd);
 
+    // Calculate speed factor based on mode and resolution
+    UpdateSpeedFactor();
+
     // Set diffusion method based on toggle and CPU capability
     if (useSIMD && HasSSE2())
         diffuseHeat = DiffuseSSE2;
@@ -268,7 +285,7 @@ static void EmitParticle(float x, float y, float speed)
     //Using trig will let us preserve speed properly since cos² + sin² = 1
     p.dx = cosf(angle) * speed;
     p.dy = sinf(angle) * speed;
-    p.heat = 180 + (dist(rng) % 76);  // range 180-255 for variation
+    p.heat = 128 + (dist(rng) % 128);  // range 128-255, matching original
     p.color = 0x00FFFFFF;  // white for now
     p.active = true;
     p.leaderIdx = -1;     // no leader assigned
@@ -476,8 +493,8 @@ static void DiffuseScalar()
             // Subtract fade BEFORE dividing (slower fade, more persistent fire)
             int result = (sum - BURNFADE) >> 2;
 
-            // Clamp and write to the row above (heat rises)
-            rowAbove[x] = (result < 0) ? 0 : (uint8_t)result;
+            // Clamp at 1 (matching original: values < 1 collapse to 0)
+            rowAbove[x] = (result < 1) ? 0 : (uint8_t)result;
         }
     }
 }
@@ -580,7 +597,7 @@ static void DiffuseSSE2()
         {
             int sum = rowAbove[x] + row[x - 1] + row[x] + row[x + 1];
             int result = (sum - BURNFADE) >> 2;
-            rowAbove[x] = (result < 0) ? 0 : (uint8_t)result;
+            rowAbove[x] = (result < 1) ? 0 : (uint8_t)result;
         }
     }
 }
@@ -651,12 +668,16 @@ static void RenderFire(HWND hwnd)
     {
         for (int y = BORDER_MARGIN; y < gH - BORDER_MARGIN; y++)
         {
-            int x = rng() % gW;
-            uint8_t& h = gHeat[y * gW + x];
-            if (h > 0 && h < SPARKLE_THRESHOLD)
+            int x = BORDER_MARGIN + rng() % (gW - 2 * BORDER_MARGIN);
+            uint8_t h = gHeat[y * gW + x];
+            if (h > SPARKLE_LOW && h < SPARKLE_HIGH)
             {
-                int boosted = h + SPARKLE_BOOST;
-                h = (boosted > 255) ? 255 : (uint8_t)boosted;
+                uint8_t bright = (h * 2 > 255) ? 255 : (uint8_t)(h * 2);
+                // Write brightened value to the 4 neighbors (cross pattern)
+                if (y > BORDER_MARGIN)              gHeat[(y-1) * gW + x] = bright;  // above
+                if (y < gH - BORDER_MARGIN - 1)    gHeat[(y+1) * gW + x] = bright;  // below
+                if (x > BORDER_MARGIN)              gHeat[y * gW + x - 1] = bright;  // left
+                if (x < gW - BORDER_MARGIN - 1)    gHeat[y * gW + x + 1] = bright;  // right
             }
         }
     }
@@ -679,12 +700,22 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 5) Seed bottom row with random heat for ambient fire
+    // 5) Seed bottom row with correlated random walk (matching original)
+    // Each pixel drifts ±32 from its left neighbor, producing a smooth wave-like flame base.
     // ----------------------------
     uint8_t* bottomRow = gHeat + (gH - 2) * gW;  // second-to-last row (last row is border)
-    for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
     {
-        bottomRow[x] = dist(rng);  // random 0-255
+        int seed = dist(rng);  // random starting value
+        for (int x = BORDER_MARGIN; x < gW - BORDER_MARGIN; x++)
+        {
+            // If existing pixel has heat, continue from it instead of the seed
+            if (bottomRow[x] != 0)
+                seed = bottomRow[x];
+            seed += (int)(dist(rng) % 65) - 32;  // drift ±32
+            if (seed < 0) seed = 0;
+            if (seed > 255) seed = 255;
+            bottomRow[x] = (uint8_t)seed;
+        }
     }
 
     // ----------------------------
@@ -712,6 +743,7 @@ static void RenderFire(HWND hwnd)
         fpsFrameCount = 0;
         fpsLastTime = now;
     }
+    Sleep(1);
 }
 
 // ------------------------------------------------------------
@@ -735,6 +767,9 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
 
         // Check bounce by default
         CheckDlgButton(hDlg, IDC_CHECK_BOUNCE, BST_CHECKED);
+
+        // Check SIMD by default (matches useSIMD initial value)
+        //CheckDlgButton(hDlg, IDC_CHECK_SIMD, BST_CHECKED);
 
         // Set controls reference text
         SetDlgItemText(hDlg, IDC_CONTROLSTEXT,
@@ -762,6 +797,15 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         {
             // Bounce toggled
             // TODO: hook up bounce toggle
+        }
+
+        if (controlId == IDC_CHECK_SIMD && notifyCode == BN_CLICKED)
+        {
+            useSIMD = (IsDlgButtonChecked(hDlg, IDC_CHECK_SIMD) == BST_CHECKED);
+            if (useSIMD && HasSSE2())
+                diffuseHeat = DiffuseSSE2;
+            else
+                diffuseHeat = DiffuseScalar;
         }
 
         return TRUE;
