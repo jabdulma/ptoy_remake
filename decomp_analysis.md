@@ -109,6 +109,16 @@ pixel[col] = (uint8)clamp((int)(result * 255) + 64, 0, 255);
 At 320px wide: ~10 periods of flame tongues across the bottom row.
 `_DAT_00410048` (= 0.03) is a hardcoded data constant, not exposed in the dialog.
 
+`_DAT_00410048` serves double duty — it is both the X scale factor and the Y scroll
+increment per frame:
+```c
+_DAT_004100d8 += _DAT_00410048;   // advance Y phase each frame
+x = col * _DAT_00410048;          // scale column to noise space
+```
+At 0.03/frame, the Y phase advances one full noise period (~1.0 unit) every ~33 frames.
+The spatial period is also ~33px (1/0.03). So the pattern scrolls exactly one "blob
+width" per 33 frames — scroll speed is intrinsically tied to visual frequency.
+
 ---
 
 ## Sparkle Effect
@@ -165,6 +175,10 @@ dy += rand_kick * 0.5 * 0.0002;
 Speed constant on bounce: **0.95** (5% energy loss).
 Random perpendicular kick factor: **0.5 × 0.0002**.
 
+**No drag or friction.** Particles maintain full velocity between bounces — there is no
+per-frame speed decay. Any perceived slowdown after an explosion is purely from gravity
+curving trajectories, not from deceleration code.
+
 ### Steering / Attraction
 Uses `fpatan` (atan2) to find angle to target, then blends velocity toward target by **5% per frame** (STEER_RATE = 0.05):
 ```c
@@ -205,6 +219,35 @@ under gravity with no steering target.
 **Fallback angle** (`_DAT_004100c0`): incremented by 0.01 radians per frame, wraps at ±π.
 Used as the steering reference direction when a particle's velocity is near zero,
 preventing stationary particles from getting stuck with no direction to rotate from.
+
+### Explosion (DAT_00410080)
+
+Triggered by right-click (`WM_RBUTTONDOWN`) or auto-mode (case 2).
+
+**Step 1 — Base speed** (computed once per explosion, random):
+```c
+speed = ABS((rand() % 10000 - 5000) * 8.0 * 0.0002) + 4.0;  // range [4.0, 12.0]
+```
+
+**Step 2 — Origin:**
+- Right-click: cursor position, clamped to [5, width-6] × [3, height-4]
+- Auto-mode: random position on screen
+- `DAT_004100b0/b4` cleared to 0 after reading
+
+**Step 3 — All particles teleported and scattered:**
+```c
+for each particle:
+    position = origin
+    perParticleSpeed = ABS((rand() % 10000 - 5000) * speed * 0.0002)  // [0, speed]
+    angle = (rand() % 10000 - 5000) * π * 0.0002                      // [-π, +π]
+    dx = cos(angle) * perParticleSpeed
+    dy = sin(angle) * perParticleSpeed
+```
+
+Every particle is teleported to the origin and given a uniformly random direction and a
+random speed in [0, base_speed]. Base speed varies per explosion ([4, 12]), so explosions
+range from weak to violent. **No burst/decay — velocities are set once and not touched
+again.** The only subsequent speed reduction is the 0.95 wall bounce multiplier.
 
 ### Gravity
 

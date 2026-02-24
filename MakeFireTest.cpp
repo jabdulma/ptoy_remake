@@ -61,6 +61,7 @@ static const int INITIAL_PARTICLE_RESERVE = 2000;
 static int gMouseX = 1;
 static int gMouseY = 1;
 static bool mouseDown = false;
+static bool rightMouseDown = false;
 
 // Control panel dialog
 static HWND gControlPanel = nullptr;
@@ -73,6 +74,28 @@ static int particleSize = 2;          // deposit size in pixels (for future UI c
 // SIMD toggle - set to true to use SSE2 diffusion, false for scalar
 // TODO: Add this into the dialog box.
 static bool useSIMD = false;
+
+// Gravity
+static bool  useGravity = true;
+static float gravityX   = 0.0f;
+static float gravityY   = 0.1f;   // downward, matching original's default direction
+static int   gGravityState = 0;   // 0=down, 1=left, 2=up, 3=right (for cycling)
+
+// Follow Leader / Multiple Leaders
+// When useFollowLeader is off: all particles steer to cursor (current behavior)
+// When on + useMultiLeader off: particle 0 is leader (targets cursor), rest target particle 0
+// When on + useMultiLeader on:  every 64th particle leads (targets cursor), others follow their group leader
+static bool useFollowLeader = true;
+static bool useMultiLeader  = true;
+
+// Fallback angle: slowly rotates each frame, gives stationary particles a direction to start from
+// Matching original's _DAT_004100c0 that increments 0.01 radians/frame, wraps at ±PI
+static float gFallbackAngle = 0.0f;
+
+// Random Events (auto-mode)
+// 5% chance per second of a random event: freeze, explosion, comet, emit-to-center, gravity change
+static bool   useRandEvents      = true;
+static time_t gLastRandEventSec  = 0;   // wall-clock second of last event check
 
 // ------------------------------------------------------------
 // 2D value noise matching original's PerlinNoise (FUN_00404550)
@@ -175,6 +198,8 @@ using DiffusionFunc = void(*)();
 static void DiffuseScalar();
 static void DiffuseSSE2();
 static DiffusionFunc diffuseHeat = DiffuseScalar;
+static void EmitParticle(float x, float y, float speed);
+static void SpawnParticlesRandom(int count);
 
 // ------------------------------------------------------------
 // CPU feature detection
@@ -361,6 +386,25 @@ static void InitBackbuffer(HWND hwnd)
         diffuseHeat = DiffuseSSE2;
     else
         diffuseHeat = DiffuseScalar;
+
+    // Spawn particles randomly across the screen with zero velocity (matching original)
+    SpawnParticlesRandom(INITIAL_PARTICLE_RESERVE);
+}
+
+// ------------------------------------------------------------
+// SpawnParticlesRandom: populate the particle array with stationary particles
+// at random screen positions. Matches original's startup state:
+// zero velocity, random position inset from edges, heat 128-255.
+// ------------------------------------------------------------
+static void SpawnParticlesRandom(int count)
+{
+    particles.clear();
+    for (int i = 0; i < count; i++)
+    {
+        float x = (float)(5 + (int)(rng() % (gW - 10)));  // inset 5px (matching original)
+        float y = (float)(3 + (int)(rng() % (gH - 6)));   // inset 3px
+        EmitParticle(x, y, 0.0f);                          // zero velocity — gravity builds speed naturally
+    }
 }
 
 // ------------------------------------------------------------
@@ -398,7 +442,7 @@ static void EmitFirework(float x, float y, int count)
 
     // Calculate base speed, then pick a random max for this explosion
     float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
-    float maxSpeed = baseSpeed * (0.5f + chance(rng) * 0.5f);  // 50%-100% of base
+    float maxSpeed = baseSpeed * (0.5f + chance(rng));  // 50%-150% of base → [4.0, 12.0] at original speeds
 
     for (int i = 0; i < count; i++)
     {
@@ -460,45 +504,79 @@ static const float STEER_RATE = 0.05f;
 static const float PI = 3.14159265f;
 
 // ------------------------------------------------------------
-// SteerParticles: rotate each particle's velocity toward the target point.
+// SteerParticles: rotate each particle's velocity toward its target.
 // Preserves speed, only changes direction. Orbiting emerges naturally
 // because the turn rate is slow enough that particles overshoot.
+//
+// Target depends on leader mode:
+//   useFollowLeader=false : all particles target cursor
+//   useFollowLeader=true, useMultiLeader=false : particle 0 leads, rest follow particle 0
+//   useFollowLeader=true, useMultiLeader=true  : every 64th particle leads, rest follow their group leader
 // ------------------------------------------------------------
-static void SteerParticles(float targetX, float targetY)
+static void SteerParticles(float cursorX, float cursorY)
 {
+    // The leader mask determines group size.
+    // 0x7FFF = effectively one global leader (particle 0); 0x3F = groups of 64
+    int leaderMask = useMultiLeader ? 0x3F : 0x7FFF;
+
     for (size_t i = 0; i < particles.size(); i++)
     {
         Particle& p = particles[i];
         if (!p.active) continue;
 
-        // Current speed - if stationary, give a gentle initial kick.
-        // Much slower than explosion speed; just enough to get steering working.
-        // Original used gravity (0.1 px/frame) to build speed gradually.
+        // Determine this particle's steering target
+        float targetX, targetY;
+        if (!useFollowLeader || (i & leaderMask) == 0)
+        {
+            // Leader (or all-to-cursor mode): target cursor.
+            // In follow-leader mode, only chase cursor while right mouse is held;
+            // otherwise the leader drifts freely (followers still chain to it).
+            if (useFollowLeader && !rightMouseDown)
+                continue;
+            targetX = cursorX;
+            targetY = cursorY;
+        }
+        else
+        {
+            // Follower: target its group leader (the nearest particle whose index
+            // is a multiple of leaderMask+1)
+            size_t leaderIdx = i & ~(size_t)leaderMask;
+            if (leaderIdx < particles.size() && particles[leaderIdx].active)
+            {
+                targetX = particles[leaderIdx].x;
+                targetY = particles[leaderIdx].y;
+            }
+            else
+            {
+                targetX = cursorX;
+                targetY = cursorY;
+            }
+        }
+
+        // Current speed. If near-zero, use fallback angle (matching original's rotating
+        // reference direction) so stationary particles don't get stuck.
         float speed = sqrtf(p.dx * p.dx + p.dy * p.dy);
+        float velAngle;
         if (speed < 0.001f)
         {
-            speed = 0.5f + chance(rng) * 0.5f;  // 0.5-1.0 px/frame
+            velAngle = gFallbackAngle;
+            speed = 0.5f + chance(rng) * 0.5f;
+        }
+        else
+        {
+            velAngle = atan2f(p.dy, p.dx);
         }
 
         // Angle from particle to target
-        float toTargetX = targetX - p.x;
-        float toTargetY = targetY - p.y;
-        float targetAngle = atan2f(toTargetY, toTargetX);
+        float targetAngle = atan2f(targetY - p.y, targetX - p.x);
 
-        // Current velocity angle
-        float velAngle = atan2f(p.dy, p.dx);
-
-        // Angle difference (how far off are we from pointing at target)
+        // Angle difference, normalized to -PI..PI
         float angleDiff = targetAngle - velAngle;
-
-        // Normalize to -PI..PI so we always turn the short way
-        if (angleDiff > PI) angleDiff -= PI * 2.0f;
+        if (angleDiff >  PI) angleDiff -= PI * 2.0f;
         if (angleDiff < -PI) angleDiff += PI * 2.0f;
 
-        // Turn a fraction toward the target
+        // Turn a fraction toward the target, reconstruct velocity
         velAngle += angleDiff * STEER_RATE;
-
-        // Reconstruct velocity: same speed, new direction
         p.dx = cosf(velAngle) * speed;
         p.dy = sinf(velAngle) * speed;
     }
@@ -523,6 +601,13 @@ static void UpdateParticles()
         // Store previous position
         float prevX = p.x;
         float prevY = p.y;
+
+        // Apply gravity before moving
+        if (useGravity)
+        {
+            p.dx += gravityX;
+            p.dy += gravityY;
+        }
 
         // Move particle
         p.x += p.dx;
@@ -736,9 +821,81 @@ static void RenderFire(HWND hwnd)
         }
 
     // ----------------------------
-    // 1b) Steer particles toward cursor if mouse is held
+    // 1b) Advance fallback angle (rotates 0.01 rad/frame, wraps at ±PI)
+    // Used by SteerParticles to give stationary particles a starting direction
     // ----------------------------
-    if (mouseDown && !particles.empty())
+    gFallbackAngle += 0.01f;
+    if (gFallbackAngle > PI) gFallbackAngle -= PI * 2.0f;
+
+    // ----------------------------
+    // 1c) Random events (auto-mode): 5% chance per second of a random event
+    // ----------------------------
+    if (useRandEvents && !particles.empty())
+    {
+        time_t nowSec = time(nullptr);
+        if (nowSec != gLastRandEventSec)
+        {
+            gLastRandEventSec = nowSec;
+            if ((int)(rng() % 20) == 0)  // 5% chance
+            {
+                switch (rng() % 5)
+                {
+                case 0: // Cycle gravity direction
+                    gGravityState = (gGravityState + 1) % 4;
+                    switch (gGravityState)
+                    {
+                    case 0: gravityX =  0.0f; gravityY =  0.1f; break;  // down
+                    case 1: gravityX = -0.1f; gravityY =  0.0f; break;  // left
+                    case 2: gravityX =  0.0f; gravityY = -0.1f; break;  // up
+                    case 3: gravityX =  0.1f; gravityY =  0.0f; break;  // right
+                    }
+                    break;
+
+                case 1: // Freeze all particles
+                    for (auto& p : particles) { p.dx = 0; p.dy = 0; }
+                    break;
+
+                case 2: // Explosion at random position
+                    EmitFirework((float)(rng() % gW), (float)(rng() % gH),
+                                 (int)particles.size());
+                    break;
+
+                case 3: // Comet: all particles to same random position + direction
+                {
+                    float cx    = (float)(rng() % gW);
+                    float cy    = (float)(rng() % gH);
+                    float angle = angleDist(rng);
+                    float spd   = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+                    for (auto& p : particles)
+                    {
+                        p.x = cx; p.y = cy;
+                        p.dx = cosf(angle) * spd;
+                        p.dy = sinf(angle) * spd;
+                    }
+                    break;
+                }
+
+                case 4: // Emit to center: all particles converge on screen center
+                    for (auto& p : particles)
+                    {
+                        p.x  = gW * 0.5f;
+                        p.y  = gH * 0.5f;
+                        p.dx = 0;
+                        p.dy = 0;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // ----------------------------
+    // 1d) Steer particles
+    // Follow-leader mode: always call so followers chain to leaders every frame.
+    //   Leaders only target cursor when right mouse is held.
+    // Normal mode: only steer when left mouse is held (original behavior).
+    // ----------------------------
+    if (!particles.empty() && (useFollowLeader || mouseDown))
     {
         SteerParticles((float)bx, (float)by);
     }
@@ -852,7 +1009,7 @@ static void RenderFire(HWND hwnd)
         fpsFrameCount = 0;
         fpsLastTime = now;
     }
-    //Sleep(1);
+    Sleep(1);
 }
 
 // ------------------------------------------------------------
@@ -879,6 +1036,12 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
 
         // Check SIMD by default (matches useSIMD initial value)
         //CheckDlgButton(hDlg, IDC_CHECK_SIMD, BST_CHECKED);
+
+        // Check these on by default (matching their initial values above)
+        CheckDlgButton(hDlg, IDC_CHECK_GRAVITY,  BST_CHECKED);
+        CheckDlgButton(hDlg, IDC_FOLLOWLEADER,   BST_CHECKED);
+        CheckDlgButton(hDlg, IDC_MULTILEADER,    BST_CHECKED);
+        CheckDlgButton(hDlg, IDC_CHECK_RANDEVENT, BST_CHECKED);
 
         // Set controls reference text
         SetDlgItemText(hDlg, IDC_CONTROLSTEXT,
@@ -920,6 +1083,27 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         if (controlId == IDC_PERLIN_FIRE && notifyCode == BN_CLICKED)
         {
             usePerlinFire = (IsDlgButtonChecked(hDlg, IDC_PERLIN_FIRE) == BST_CHECKED);
+        }
+
+        if (controlId == IDC_CHECK_GRAVITY && notifyCode == BN_CLICKED)
+        {
+            useGravity = (IsDlgButtonChecked(hDlg, IDC_CHECK_GRAVITY) == BST_CHECKED);
+        }
+
+        if (controlId == IDC_FOLLOWLEADER && notifyCode == BN_CLICKED)
+        {
+            useFollowLeader = (IsDlgButtonChecked(hDlg, IDC_FOLLOWLEADER) == BST_CHECKED);
+        }
+
+        if (controlId == IDC_MULTILEADER && notifyCode == BN_CLICKED)
+        {
+            useMultiLeader = (IsDlgButtonChecked(hDlg, IDC_MULTILEADER) == BST_CHECKED);
+        }
+
+        if (controlId == IDC_CHECK_RANDEVENT && notifyCode == BN_CLICKED)
+        {
+            useRandEvents = (IsDlgButtonChecked(hDlg, IDC_CHECK_RANDEVENT) == BST_CHECKED);
+            gLastRandEventSec = time(nullptr);  // reset timer so first event isn't immediate
         }
 
         return TRUE;
@@ -1024,6 +1208,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_RBUTTONDOWN:
     {
+        rightMouseDown = true;
+
         // Convert window coords to buffer coords
         RECT rc;
         GetClientRect(hwnd, &rc);
@@ -1039,6 +1225,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         EmitFirework(bx, by, 2000);
         return 0;
     }
+
+    case WM_RBUTTONUP:
+        rightMouseDown = false;
+        return 0;
 
     case WM_KEYDOWN:
     {
