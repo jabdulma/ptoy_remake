@@ -22,9 +22,31 @@
 static int gW = 1600;
 static int gH = 1200;
 
+// Resolution presets: { width, height, dropdown label }
+// Comments match the original ptoy notes where applicable.
+struct ResPreset { int w, h; const wchar_t* label; };
+static const ResPreset RES_PRESETS[] = {
+    {  320,  240, L"320 x 240  (Too Fast!)"             },
+    {  640,  480, L"640 x 480  (Yummy)"                 },
+    {  800,  600, L"800 x 600  (Getting There)"         },
+    { 1024,  768, L"1024 x 768  (CPU for Dinner)"       },
+    { 1152,  864, L"1152 x 864  (Classic Desktop)"      },
+    { 1280, 1024, L"1280 x 1024  (Whoah There)"         },
+    { 1600, 1200, L"1600 x 1200  (Go For It All!)"      },
+    { 1920, 1080, L"1920 x 1080  (HD Baby)"             },
+    { 2048, 1536, L"2048 x 1536  (Biiiig 4:3)"          },
+    { 2560, 1440, L"2560 x 1440  (John's Desktop)"      },
+    { 3440, 1440, L"3440 x 1440  (Ultrawide)"           },
+    { 3840, 2160, L"3840 x 2160  (4K!!!)"               },
+    { 3840, 2160, L"4000 x 4000  (Cover all monitors)"  },
+};
+static const int NUM_RES_PRESETS = _countof(RES_PRESETS);
+static int currentResPreset = 6;  // Default: 1600 x 1200
+
 static BITMAPINFO gBmi = {};
 static void* gPixels = nullptr;          // raw pointer returned by CreateDIBSection
 static uint32_t* pixelMem = nullptr;     // typed view of gPixels (uint32 per pixel)
+static HBITMAP   sDibSection = nullptr;  // DIBSection handle kept alive; file-scope so ChangeResolution can free it
 
 static uint8_t* gHeat = nullptr;         // simulation buffer: 1 byte per pixel
 static uint32_t gPalette[256] = {};      // palette[heat] -> 0x00RRGGBB
@@ -224,6 +246,7 @@ static int fpsFrameCount = 0;             // frames since last update
 //refresh rate.  We won't know with decompiling it... or doing some screen recording
 
 static bool useFrameLimiter = false;
+static bool useOriginalSpeed = true;   // Sleep(1) each frame to match original's loop pacing
 static int gRefreshRate = 60;                       // detected monitor refresh rate
 static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
 static LARGE_INTEGER gLastFrameTime = {};           // when last frame completed
@@ -254,20 +277,20 @@ static void UpdateRefreshRate(HWND hwnd)
 
 // Palette configuration
 // TODO: Add color scheme selector and nitro toggle to the dialog box.
-static bool useNitro = false;  // boost blue at high heat for white-hot effect
+static bool useNitro = true;  // boost blue at high heat for white-hot effect
 
 // Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
 struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
 static const ColorScheme PALETTE_PRESETS[] = {
-    {   0, 255,   0,  255, 255,  55 },  // 0: Green Fire (our default)
-    { 255, 128,   0,  255, 255,   0 },  // 1: Fiery Orange (original default)
-    {   0, 128, 255,    0, 255, 255 },  // 2: Skyish Teal
-    {  64,  64, 128,  192, 192, 255 },  // 3: Velvet Blue
+    { 255, 128,   0,  255, 255,   0 },  // 0: Fiery Orange (original default)
+    {   0, 128, 255,    0, 255, 255 },  // 1: Skyish Teal
+    {  64,  64, 128,  192, 192, 255 },  // 2: Velvet Blue
+    {   0, 255,   0,  255, 255,  55 },  // 3: Terry's Green
     {  32, 128,  32,  160, 255, 160 },  // 4: Slimy Green
     { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
 };
 static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
-static int currentPalette = 1;
+static int currentPalette = 0;
 
 // ------------------------------------------------------------
 // BuildPalette: two-color spread palette with optional "nitro" boost.
@@ -335,8 +358,7 @@ static void InitBackbuffer(HWND hwnd)
     ReleaseDC(hwnd, hdc);
 
     // Keep the DIB handle alive for the lifetime of the program.
-    static HBITMAP sKeepAlive = nullptr;
-    sKeepAlive = dib;
+    sDibSection = dib;
 
     if (!dib || !gPixels)
     {
@@ -405,6 +427,66 @@ static void SpawnParticlesRandom(int count)
         float y = (float)(3 + (int)(rng() % (gH - 6)));   // inset 3px
         EmitParticle(x, y, 0.0f);                          // zero velocity — gravity builds speed naturally
     }
+}
+
+// ------------------------------------------------------------
+// ChangeResolution: tear down and rebuild the buffers at a new size,
+// then resize the main window to match (accounting for decorations).
+// Pass resizeWindow=false when the window is already the target size
+// (e.g., called from WM_SIZE during a maximize).
+// ------------------------------------------------------------
+static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
+{
+    int particleCount = (int)particles.size();
+
+    // --- Free old buffers ---
+    if (gHeat)      { VirtualFree(gHeat, 0, MEM_RELEASE); gHeat = nullptr; }
+    if (sDibSection){ DeleteObject(sDibSection); sDibSection = nullptr; }
+    gPixels  = nullptr;
+    pixelMem = nullptr;
+
+    // --- Update dimensions ---
+    gW = newW;
+    gH = newH;
+
+    // --- Rebuild BITMAPINFO for new size ---
+    gBmi.bmiHeader.biWidth  =  gW;
+    gBmi.bmiHeader.biHeight = -gH;  // negative = top-down
+
+    // --- Recreate DIBSection ---
+    HDC hdc = GetDC(hwnd);
+    sDibSection = CreateDIBSection(hdc, &gBmi, DIB_RGB_COLORS, &gPixels, nullptr, 0);
+    ReleaseDC(hwnd, hdc);
+    if (!sDibSection || !gPixels) return;
+    pixelMem = (uint32_t*)gPixels;
+
+    // --- Reallocate heat buffer ---
+    gHeat = (uint8_t*)VirtualAlloc(nullptr, (size_t)gW * (size_t)gH,
+                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!gHeat) return;
+    ZeroMemory(gHeat, (size_t)gW * (size_t)gH);
+
+    // --- Update speed factor for new resolution ---
+    UpdateSpeedFactor();
+
+    // --- Resize window to show the new buffer 1:1 ---
+    if (resizeWindow)
+    {
+        // Restore from maximized first so SetWindowPos can set the new size freely
+        if (IsZoomed(hwnd))
+            ShowWindow(hwnd, SW_RESTORE);
+
+        DWORD style   = (DWORD)GetWindowLong(hwnd, GWL_STYLE);
+        DWORD exStyle = (DWORD)GetWindowLong(hwnd, GWL_EXSTYLE);
+        RECT rc = { 0, 0, gW, gH };
+        AdjustWindowRectEx(&rc, style, FALSE, exStyle);  // FALSE = no menu bar
+        SetWindowPos(hwnd, nullptr, 0, 0,
+                     rc.right - rc.left, rc.bottom - rc.top,
+                     SWP_NOMOVE | SWP_NOZORDER);
+    }
+
+    // --- Respawn particles at positions valid for the new buffer ---
+    SpawnParticlesRandom(particleCount > 0 ? particleCount : INITIAL_PARTICLE_RESERVE);
 }
 
 // ------------------------------------------------------------
@@ -1009,7 +1091,10 @@ static void RenderFire(HWND hwnd)
         fpsFrameCount = 0;
         fpsLastTime = now;
     }
-    Sleep(1);
+    // Original speed mode: Sleep(1) each frame to match the original ptoy's loop pacing.
+    // The original called Sleep(1) unconditionally in its main loop, which on Windows
+    // yields ~15ms (one timer tick), capping it to roughly 60fps on period hardware.
+    if (useOriginalSpeed) Sleep(1);
 }
 
 // ------------------------------------------------------------
@@ -1024,15 +1109,25 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         // Set default particle count
         SetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, 2000, FALSE);
 
-        // Populate palette dropdown
-        HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_PALETTE);
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Green");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Red");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Blue");
-        SendMessage(hCombo, CB_SETCURSEL, 0, 0);  // select first item
+        // Populate resolution dropdown.
+        // Use CB_INSERTSTRING (not CB_ADDSTRING) to preserve order despite CBS_SORT on the control.
+        HWND hResCombo = GetDlgItem(hDlg, IDC_COMBO_RESOLUTION);
+        for (int i = 0; i < NUM_RES_PRESETS; i++)
+            SendMessage(hResCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)RES_PRESETS[i].label);
+        SendMessage(hResCombo, CB_SETCURSEL, (WPARAM)currentResPreset, 0);
 
-        // Check bounce by default
-        CheckDlgButton(hDlg, IDC_CHECK_BOUNCE, BST_CHECKED);
+        // Populate palette dropdown (names match PALETTE_PRESETS order)
+        HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_PALETTE);
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Fiery Orange");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Skyish Teal");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Velvet Blue");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Terry's Green");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Slimy Green");
+        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Burning Pink");
+        SendMessage(hCombo, CB_SETCURSEL, currentPalette, 0);
+
+        // Original speed on by default
+        CheckDlgButton(hDlg, IDC_CHECK_ORIGSPEED, BST_CHECKED);
 
         // Check SIMD by default (matches useSIMD initial value)
         //CheckDlgButton(hDlg, IDC_CHECK_SIMD, BST_CHECKED);
@@ -1059,16 +1154,32 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         int controlId = LOWORD(wParam);
         int notifyCode = HIWORD(wParam);
 
-        if (controlId == IDC_COMBO_PALETTE && notifyCode == CBN_SELCHANGE)
+        if (controlId == IDC_COMBO_RESOLUTION && notifyCode == CBN_SELCHANGE)
         {
-            // Palette changed - rebuild palette
-            // TODO: hook up palette switching
+            int sel = (int)SendDlgItemMessage(hDlg, IDC_COMBO_RESOLUTION, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < NUM_RES_PRESETS)
+            {
+                currentResPreset = sel;
+                ChangeResolution(GetParent(hDlg),
+                                 RES_PRESETS[sel].w, RES_PRESETS[sel].h,
+                                 true);  // resize window to match
+            }
         }
 
-        if (controlId == IDC_CHECK_BOUNCE && notifyCode == BN_CLICKED)
+        if (controlId == IDC_COMBO_PALETTE && notifyCode == CBN_SELCHANGE)
         {
-            // Bounce toggled
-            // TODO: hook up bounce toggle
+            int sel = (int)SendDlgItemMessage(hDlg, IDC_COMBO_PALETTE, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < NUM_PALETTE_PRESETS)
+            {
+                currentPalette = sel;
+                const ColorScheme& cs = PALETTE_PRESETS[currentPalette];
+                BuildPalette(cs.r1, cs.g1, cs.b1, cs.r2, cs.g2, cs.b2);
+            }
+        }
+
+        if (controlId == IDC_CHECK_ORIGSPEED && notifyCode == BN_CLICKED)
+        {
+            useOriginalSpeed = (IsDlgButtonChecked(hDlg, IDC_CHECK_ORIGSPEED) == BST_CHECKED);
         }
 
         if (controlId == IDC_CHECK_SIMD && notifyCode == BN_CLICKED)
@@ -1273,6 +1384,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+
+    case WM_SIZE:
+        if (wParam != SIZE_MINIMIZED)
+        {
+            // Keep buffer 1:1 with the client area on any resize.
+            // lParam is already the client size (excludes title bar and borders).
+            // The (newW != gW || newH != gH) guard prevents re-entrancy when
+            // ChangeResolution itself calls SetWindowPos (dropdown path).
+            int newW = LOWORD(lParam);
+            int newH = HIWORD(lParam);
+            if (newW > 0 && newH > 0 && (newW != gW || newH != gH))
+                ChangeResolution(hwnd, newW, newH, false);
+        }
+        return 0;
 
     case WM_DISPLAYCHANGE:
         // Monitor settings changed (resolution, refresh rate)

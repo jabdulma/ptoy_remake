@@ -17,6 +17,7 @@
 #define IDC_EDIT_PARTICLES              1001
 #define IDC_COMBO_PALETTE               1002
 #define IDC_CHECK_BOUNCE                1003
+#define IDC_CHECK_ORIGSPEED             1003
 #define IDC_CHECK_GRAVITY               1004
 #define IDC_CHECK_SIMD                  1005
 #define IDC_FOLLOWLEADER                1006

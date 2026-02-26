@@ -1,43 +1,49 @@
 # Particle Toy: Remake - TODO List
 
-## Bugs / Behavior Fixes
-- [ ] **Speed fix for steering from frozen state** - When particles are frozen (space) and then clicked, they get explosion-level speed instead of a gentler pull. Need a lower initial speed for the steering kick vs firework emit.
-- [ ] **Tweak sparkle effect** - Sparkles not quite right yet. Revisit threshold, boost values, and possibly frequency.
+---
 
-## Features to Implement
-- [ ] **Gravity system** - Rotating gravity direction (original cycles every ~50 seconds through down/left/up/right). Needs a toggle.  Let user control gravity direction as well.
-- [ ] **Follow-the-leader** - A randomly moving leader on screen that particles follow via steering. Particle struct already has `leaderIdx` stub.
-- [ ] **Multiple leaders** - 1-5 leaders on screen, particles randomly assigned to follow one. Extension of follow-the-leader.
-- [ ] **Bottom fire** - Original has a smoother bottom fire, probably due to "Pixel walking" - make a similar adjustment.
-- [ ] **Perlin noise bottom fire** - Original uses Perlin noise for smooth, coherent flame pillars along the bottom. Our current pure-random seeding is more chaotic. Needs a toggle to switch between styles.
-- [ ] **Perlin noise bottom fire** - Toggle for the fire types mentioned above?
-- [ ] **Sunburst explosion mode** - All particles get the same speed (creates a clean expanding ring). 50/50 coin flip in original. Fun optional mode.
-- [ ] **AltColor tuning** - Per-frame particle heat fade + bounce brightening. Implemented but currently disabled because it flattens the color. Needs tuning to look right with our palette system.
-- [ ] **Original Speed Calc** - This is a signficant add on but allow the user to have the original base speed calculation.  Pixels per frame, not resolution indpendent.
+## Release 1.0
 
-## UI / Control Panel Wiring
-- [ ] **SIMD toggle** (line 61) - Wire `useSIMD` to a checkbox in the dialog.
-- [ ] **Sparkle toggle** (line 65) - Wire `useSparkles` to a checkbox in the dialog.
-- [ ] **Frame limiter toggle** (line 92) - Wire `useFrameLimiter` to a checkbox in the dialog.
-- [ ] **Color scheme selector** (line 128) - Wire `currentPalette` to the existing combo box (`IDC_COMBO_PALETTE`). Update palette presets in dropdown.
-- [ ] **Nitro toggle** (line 128) - Wire `useNitro` to a checkbox in the dialog.
-- [ ] **AltColor toggle** (line 339) - Wire `useAltColor` to a checkbox in the dialog.
-- [ ] **Palette combo box** (line 757) - Hook up `CBN_SELCHANGE` to rebuild palette with selected scheme.
-- [ ] **Bounce toggle** (line 763) - Hook up `IDC_CHECK_BOUNCE` to control wall bounce behavior.
-- [ ] **Gravity toggle** - Add checkbox for gravity enable/disable (once gravity is implemented).
-- [ ] **Leader toggle** - Add controls for leader mode (once leaders are implemented).
-- [ ] **Particle count** - Wire `IDC_EDIT_PARTICLES` to control how many particles are emitted.
-- [ ] **Speed multiplier** - Expose `userSpeedMultiplier` as a slider or input.
+- [ ] **Particle count wired up** - Wire `IDC_EDIT_PARTICLES` so changing the value respawns particles at the new count.
+- [ ] **Fullscreen toggle** - F12 hotkey + `IDC_CHECK_FULLSCREEN` checkbox. Save pre-fullscreen style/rect, strip title bar, `SetWindowPos` to cover the monitor. Restore on toggle. Buffer adapts automatically via `WM_SIZE`.
+- [X] **Original speed mode** - Replace the bounce toggle with an "Original Speed" checkbox. Puts a `Sleep(1)` in the render loop to match the original's frame pacing. The `Sleep(1)` is already in the code (commented out) — need to decide exact placement with John before wiring it up.
+- [ ] **Original speed default** - Set to default on.
+- [ ] **Resolution display** - Show current buffer dimensions in the control panel (e.g. `"1920 x 1080"`) using a static text label, updated on each resize. Same pattern as the live FPS counter.
+- [ ] **Closing the controls window closes the app** - Currently the control panel hides on close (`WM_CLOSE` returns `SW_HIDE`). For 1.0, closing it should post `WM_CLOSE` to the main window instead, so the two windows feel like one application.
+- [ ] **Release build / GitHub Action** - Create a GitHub Action that produces a signed/zipped binary on every push to `master`.
+- [ ] **Help System** - Create a way to show descriptions for each toggle.  Ideas include Window's help system, or temporarily replacing the controls text.
+- [ ] **Github Actions** - Create a github actions pipeline to build the releases.
+---
 
-## Code refactor
-- [ ] Code will eventually need to be split up, it's becoming cluttered.
+## Release 1.x
 
- 
-## Polish / Future Ideas
-- [ ] **UI layout pass** - Redesign control panel to accommodate all toggles without being overwhelming. Consider grouping by category (fire, particles, display).
-- [ ] **Performance on older machines** - Profile and test on lower-end hardware. SIMD toggle exists for this.
-- [ ] **Delta-time movement** - Decouple simulation speed from frame rate. Currently frame-rate dependent. Non-trivial change.
-- [ ] **Color cycling** - Original smoothly interpolates between color schemes over time. Cool screensaver-like effect.
+- [ ] **Hide/show control panel without closing the sim** - UX idea: a small always-on-top toolbar or a tray icon that lets the user dismiss and recall the control panel independently of the sim window. The sim should keep running with the panel hidden. Alt+C or a corner button on the sim window are other options.
+- [ ] **Expanded control panel** - Either a "More..." expand button that grows the dialog, or a larger window overall. Needed to fit speed/size sliders and future controls without crowding.
+- [ ] **Speed slider** - Expose `userSpeedMultiplier` as a trackbar.
+- [ ] **Size slider** - Control `particleSize` (heat deposit radius) via a trackbar.
+- [ ] **Nitro colors** - Wire `useNitro` to a checkbox; rebuilds palette with blue boost at high heat for white-hot tips.
+- [ ] **Implement a config system** - Allow users to store defaults in something like a conf or ini file.  Format to be determined.
 
-## Release 
-- [ ] **Release system / Git Actions ** - Create a git action to create a binary every time we release to master.
+---
+
+## Bugs / Behavior
+
+- [ ] **Speed kick from frozen state** - Frozen particles (Space) get explosion-level speed on first click instead of a gentle pull. Need a lower initial speed for the steering kick path.
+- [X] **Sparkle effect tuning** - Threshold, boost, and frequency not quite right yet. Revisit after other changes settle.
+- [X] **AltColor tuning** - Per-frame heat fade + bounce brightening is implemented but disabled (flattens colors). Needs tuning to work with the current palette system.
+
+---
+
+## Ideas / Future
+
+- [ ] **Custom colors** - Two `CHOOSECOLOR` pickers feeding directly into `BuildPalette`. Natural extension of the existing palette system.
+- [ ] **Perlin debug window** - Secondary window rendering the Perlin noise output as a grayscale scrolling DIBSection. Useful for tuning and a cool easter egg. Taps directly into `gPerlinY` / `PerlinNoise2D`.
+- [ ] **Multi-window particle bouncing** - Single-process, multiple sim windows. Particles use world-space coordinates spanning monitor boundaries; each window renders its viewport. Allows multi-monitor support where particles physically cross between screens.
+- [ ] **Color cycling** - Smoothly interpolate between color schemes over time. Screensaver-style effect.
+- [ ] **Sunburst explosion mode** - All particles same speed (clean expanding ring). 50/50 mode flip, like the original.
+
+---
+
+## Code Health
+
+- [ ] **Split source file** - `MakeFireTest.cpp` is getting long. Split into logical units (fire sim, particles, UI/dialog, render) as we approach 1.0 feature-complete.
