@@ -1217,6 +1217,32 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             gLastRandEventSec = time(nullptr);  // reset timer so first event isn't immediate
         }
 
+        if (controlId == IDC_EDIT_PARTICLES && notifyCode == EN_CHANGE)
+        {
+            BOOL ok;
+            int count = (int)GetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, &ok, FALSE);
+            if (ok && count > 0)
+            {
+                if (count > 50000) count = 50000;
+                int current = (int)particles.size();
+                if (count > current)
+                {
+                    // Grow: append new particles at random positions with zero velocity
+                    for (int i = current; i < count; i++)
+                    {
+                        float x = (float)(5 + (int)(rng() % (gW - 10)));
+                        float y = (float)(3 + (int)(rng() % (gH - 6)));
+                        EmitParticle(x, y, 0.0f);
+                    }
+                }
+                else if (count < current)
+                {
+                    // Shrink: drop from the end of the array
+                    particles.resize(count);
+                }
+            }
+        }
+
         return TRUE;
     }
 
@@ -1333,7 +1359,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         float bx = (float)mx * gW / (winW ? winW : 1);
         float by = (float)my * gH / (winH ? winH : 1);
 
-        EmitFirework(bx, by, 2000);
+        EmitFirework(bx, by, particles.size());
         return 0;
     }
 
