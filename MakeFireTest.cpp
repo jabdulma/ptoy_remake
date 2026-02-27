@@ -537,9 +537,48 @@ static void EmitFirework(float x, float y, int count)
 }
 
 // ------------------------------------------------------------
-// DepositHeatLine: draw a line of heat from (x0,y0) to (x1,y1)
+// DepositHeatLine: Bresenham integer line draw, matching original ptoy.
+// Writes a 3-pixel vertical strip (center + above + below) at each step —
+// same as original's "center pixel + pixel above + pixel below" pattern.
+// No sqrtf, no float division per step, pure integer arithmetic.
 // ------------------------------------------------------------
-static void DepositHeatLine(float x0, float y0, float x1, float y1, uint8_t heat)
+static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t heat)
+{
+    int x0 = (int)x0f;
+    int y0 = (int)y0f;
+    int x1 = (int)x1f;
+    int y1 = (int)y1f;
+
+    int dx  =  abs(x1 - x0);
+    int dy  =  abs(y1 - y0);
+    int sx  = (x0 < x1) ? 1 : -1;
+    int sy  = (y0 < y1) ? 1 : -1;
+    int err = dx - dy;
+
+    for (;;)
+    {
+        // 3-pixel vertical strip at (x0, y0): center, above, below.
+        // Unsigned cast turns negative coords into large values, failing the < gW/gH check — safe one-shot bounds test.
+        if ((unsigned)x0 < (unsigned)gW)
+        {
+            if ((unsigned)y0       < (unsigned)gH) gHeat[ y0      * gW + x0] = heat;
+            if ((unsigned)(y0 - 1) < (unsigned)gH) gHeat[(y0 - 1) * gW + x0] = heat;
+            if ((unsigned)(y0 + 1) < (unsigned)gH) gHeat[(y0 + 1) * gW + x0] = heat;
+        }
+
+        if (x0 == x1 && y0 == y1) break;
+
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
+// ------------------------------------------------------------
+// DepositHeatLineHeavy: original float-based line draw (kept for comparison).
+// draw a line of heat from (x0,y0) to (x1,y1)
+// ------------------------------------------------------------
+static void DepositHeatLineHeavy(float x0, float y0, float x1, float y1, uint8_t heat)
 {
     float dx = x1 - x0;
     float dy = y1 - y0;
