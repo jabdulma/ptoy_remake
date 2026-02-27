@@ -22,6 +22,8 @@
 static int gW = 1600;
 static int gH = 1200;
 
+static const int MAX_PARTICLES = 100000;
+
 // Resolution presets: { width, height, dropdown label }
 // Comments match the original ptoy notes where applicable.
 struct ResPreset { int w, h; const wchar_t* label; };
@@ -64,7 +66,7 @@ static const float ORIGINAL_BASE_SPEED = 8.0f;         // original's ~8 px/frame
 static const float DEFAULT_SPEED_FACTOR = 0.01f;        // resolution-independent default
 static float PARTICLE_SPEED_FACTOR = 0.01f;             // active speed factor (recalculated)
 static float userSpeedMultiplier = 0.5f;                 // user-adjustable slider
-static bool useOriginalSpeeds = false;                    // match original's absolute pixel speeds
+static bool useOriginalSpeeds = true;                    // match original's absolute pixel speeds
 
 // Recalculate speed factor based on mode and current resolution
 static void UpdateSpeedFactor()
@@ -277,7 +279,7 @@ static void UpdateRefreshRate(HWND hwnd)
 
 // Palette configuration
 // TODO: Add color scheme selector and nitro toggle to the dialog box.
-static bool useNitro = true;  // boost blue at high heat for white-hot effect
+static bool useNitro = false;  // boost blue at high heat for white-hot effect
 
 // Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
 struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
@@ -1223,7 +1225,7 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             int count = (int)GetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, &ok, FALSE);
             if (ok && count > 0)
             {
-                if (count > 50000) count = 50000;
+                if (count > MAX_PARTICLES) count = MAX_PARTICLES;
                 int current = (int)particles.size();
                 if (count > current)
                 {
