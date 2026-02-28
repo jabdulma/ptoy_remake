@@ -20,7 +20,7 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build Release x64
-        run: msbuild ptoy-remake.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+        run: msbuild ptoy-remake.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
