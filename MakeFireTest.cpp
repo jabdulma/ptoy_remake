@@ -14,25 +14,53 @@
 #include "particle.h"
 #include "Resource.h"
 
-// ------------------------------------------------------------
-// Backbuffer (what we DISPLAY): 32-bit pixels (0x00RRGGBB)
-// Heat buffer (what we SIMULATE): 8-bit intensity (0..255)
-// ------------------------------------------------------------
+// ============================================================
+// SIMULATION SETTINGS
+// Defaults for all toggles and values exposed in the control
+// panel. Edit here to change startup state.
+// ============================================================
 
-static int gW = 1600;
-static int gH = 1200;
+// Resolution & display
+static int   currentResPreset    = 4;        // IDC_COMBO_RESOLUTION (index into RES_PRESETS)
+
+// Color
+static int   currentPalette      = 0;        // IDC_COMBO_PALETTE
+static bool  useNitro            = false;    // future: blue boost for white-hot tips
+
+// Particle behavior
+static float userSpeedMultiplier = 0.5f;     // future: speed slider
+static int   particleSize        = 2;        // future: size slider
+
+// Behavior toggles
+static bool  useOriginalSpeed    = true;     // IDC_CHECK_ORIGSPEED  — Sleep(1) loop pacing
+static bool  useOriginalSpeeds   = true;     // speed mode: absolute pixel/frame vs relative
+static bool  useSIMD             = false;    // IDC_CHECK_SIMD
+static bool  useGravity          = false;     // IDC_CHECK_GRAVITY
+static float gravityX            = 0.0f;
+static float gravityY            = 0.1f;     // downward, matching original's default
+static int   gGravityState       = 0;        // 0=down 1=left 2=up 3=right (for cycling)
+static bool  useFollowLeader     = false;     // IDC_FOLLOWLEADER
+static bool  useMultiLeader      = false;     // IDC_MULTILEADER
+static bool  usePerlinFire       = false;    // IDC_PERLIN_FIRE
+static bool  useRandEvents       = false;     // IDC_CHECK_RANDEVENT
+static bool  useSparkles         = true;     // future: sparkle toggle
+static bool  useFrameLimiter     = false;    // future: frame rate limiter
+
+// ============================================================
+// ENGINE INTERNALS
+// Buffers, RNG, simulation constants, window state.
+// ============================================================
 
 static const int MAX_PARTICLES = 100000;
 
 // Resolution presets: { width, height, dropdown label }
-// Comments match the original ptoy notes where applicable.
 struct ResPreset { int w, h; const wchar_t* label; };
 static const ResPreset RES_PRESETS[] = {
     {  320,  240, L"320 x 240  (Too Fast!)"             },
     {  640,  480, L"640 x 480  (Yummy)"                 },
     {  800,  600, L"800 x 600  (Getting There)"         },
     { 1024,  768, L"1024 x 768  (CPU for Dinner)"       },
-    { 1152,  864, L"1152 x 864  (Classic Desktop)"      },
+    { 1152,  864, L"1152 x 864  (Seumas' Desktop)"      },
     { 1280, 1024, L"1280 x 1024  (Whoah There)"         },
     { 1600, 1200, L"1600 x 1200  (Go For It All!)"      },
     { 1920, 1080, L"1920 x 1080  (HD Baby)"             },
@@ -43,30 +71,30 @@ static const ResPreset RES_PRESETS[] = {
     { 3840, 2160, L"4000 x 4000  (Cover all monitors)"  },
 };
 static const int NUM_RES_PRESETS = _countof(RES_PRESETS);
-static int currentResPreset = 6;  // Default: 1600 x 1200
 
-static BITMAPINFO gBmi = {};
-static void* gPixels = nullptr;          // raw pointer returned by CreateDIBSection
-static uint32_t* pixelMem = nullptr;     // typed view of gPixels (uint32 per pixel)
-static HBITMAP   sDibSection = nullptr;  // DIBSection handle kept alive; file-scope so ChangeResolution can free it
+static int gW = RES_PRESETS[currentResPreset].w;
+static int gH = RES_PRESETS[currentResPreset].h;
 
-static uint8_t* gHeat = nullptr;         // simulation buffer: 1 byte per pixel
-static uint32_t gPalette[256] = {};      // palette[heat] -> 0x00RRGGBB
+// Rendering buffers
+static BITMAPINFO gBmi      = {};
+static void*      gPixels   = nullptr;      // raw pointer returned by CreateDIBSection
+static uint32_t*  pixelMem  = nullptr;      // typed view of gPixels (uint32 per pixel)
+static HBITMAP    sDibSection = nullptr;    // DIBSection handle; file-scope for ChangeResolution
 
-// RNG (useful later for "sparklies" etc. - not required for basic fire)
+static uint8_t*  gHeat      = nullptr;      // simulation buffer: 1 byte per pixel
+static uint32_t  gPalette[256] = {};        // palette[heat] -> 0x00RRGGBB
+
+// RNG
 static std::mt19937 rng{ std::random_device{}() };
-static std::uniform_int_distribution<int> dist(0, 255);
-static std::uniform_real_distribution<float> angleDist(0.0f, 6.283185f);  // 0 to 2*PI
-static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f); // ±15% speed variance
-static std::uniform_real_distribution<float> chance(0.0f, 1.0f);          // for percentage rolls
+static std::uniform_int_distribution<int>    dist(0, 255);
+static std::uniform_real_distribution<float> angleDist(0.0f, 6.283185f);   // 0 to 2*PI
+static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f);  // ±15% speed variance
+static std::uniform_real_distribution<float> chance(0.0f, 1.0f);           // for percentage rolls
 
 // Speed system
-// TODO: Add original speed toggle and speed multiplier slider to the dialog box.
-static const float ORIGINAL_BASE_SPEED = 8.0f;         // original's ~8 px/frame at any resolution
-static const float DEFAULT_SPEED_FACTOR = 0.01f;        // resolution-independent default
-static float PARTICLE_SPEED_FACTOR = 0.01f;             // active speed factor (recalculated)
-static float userSpeedMultiplier = 0.5f;                 // user-adjustable slider
-static bool useOriginalSpeeds = true;                    // match original's absolute pixel speeds
+static const float ORIGINAL_BASE_SPEED  = 8.0f;    // original's ~8 px/frame at any resolution
+static const float DEFAULT_SPEED_FACTOR = 0.01f;   // resolution-independent default
+static float       PARTICLE_SPEED_FACTOR = 0.01f;  // active speed factor (recalculated on resize)
 
 // Recalculate speed factor based on mode and current resolution
 static void UpdateSpeedFactor()
@@ -81,45 +109,24 @@ static void UpdateSpeedFactor()
 static std::vector<Particle> particles;
 static const int INITIAL_PARTICLE_RESERVE = 2000;
 
-// Mouse coordinates stored in WINDOW client space (not buffer space)
-static int gMouseX = 1;
-static int gMouseY = 1;
-static bool mouseDown = false;
+// Mouse state (window client-space coordinates)
+static int  gMouseX       = 1;
+static int  gMouseY       = 1;
+static bool mouseDown     = false;
 static bool rightMouseDown = false;
 
 // Control panel dialog
 static HWND gControlPanel = nullptr;
 
-// Fire tuning
-static const int BORDER_MARGIN = 1;   // skip 1-pixel border to avoid bounds issues
-static const int BURNFADE = 6;   // how fast heat decays (bigger = faster fade)
-static int particleSize = 2;          // deposit size in pixels (for future UI control)
+// Simulation constants
+static const int BORDER_MARGIN = 1;   // skip 1-pixel border for bounds safety
+static const int BURNFADE      = 6;   // heat decay rate per frame
 
-// SIMD toggle - set to true to use SSE2 diffusion, false for scalar
-// TODO: Add this into the dialog box.
-static bool useSIMD = false;
+// Particle steering
+static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped particles a direction
 
-// Gravity
-static bool  useGravity = true;
-static float gravityX   = 0.0f;
-static float gravityY   = 0.1f;   // downward, matching original's default direction
-static int   gGravityState = 0;   // 0=down, 1=left, 2=up, 3=right (for cycling)
-
-// Follow Leader / Multiple Leaders
-// When useFollowLeader is off: all particles steer to cursor (current behavior)
-// When on + useMultiLeader off: particle 0 is leader (targets cursor), rest target particle 0
-// When on + useMultiLeader on:  every 64th particle leads (targets cursor), others follow their group leader
-static bool useFollowLeader = true;
-static bool useMultiLeader  = true;
-
-// Fallback angle: slowly rotates each frame, gives stationary particles a direction to start from
-// Matching original's _DAT_004100c0 that increments 0.01 radians/frame, wraps at ±PI
-static float gFallbackAngle = 0.0f;
-
-// Random Events (auto-mode)
-// 5% chance per second of a random event: freeze, explosion, comet, emit-to-center, gravity change
-static bool   useRandEvents      = true;
-static time_t gLastRandEventSec  = 0;   // wall-clock second of last event check
+// Random events timer
+static time_t gLastRandEventSec = 0; // wall-clock second of last event check
 
 // ------------------------------------------------------------
 // 2D value noise matching original's PerlinNoise (FUN_00404550)
@@ -136,7 +143,6 @@ static time_t gLastRandEventSec  = 0;   // wall-clock second of last event check
 static uint8_t gPerlinPerm[512];     // permutation table (doubled for wrapping)
 static double  gPerlinGrad[256];     // value noise table: random doubles in [0, 1]
 static double  gPerlinY = 0.0;       // Y phase, incremented each frame for animation
-static bool    usePerlinFire = false; // toggle: Perlin vs random-walk bottom row
 
 // Confirmed from original binary (FUN_00404550 / DAT_0040f4d8 / DAT_0040f510)
 static const double kPerlinAmp[7] = {
@@ -211,8 +217,6 @@ static double PerlinNoise2D(double x, double y, int numOctaves)
 }
 
 // Sparkle effect - brightens random dark pixels along each row for shimmer
-// TODO: Add this as a toggle in the dialog box.
-static bool useSparkles = true;
 // Original thresholds: 32 < value < 128. Effect: double the value, spread to 4 neighbors.
 static const uint8_t SPARKLE_LOW  = 32;   // only sparkle pixels above this
 static const uint8_t SPARKLE_HIGH = 128;  // only sparkle pixels below this
@@ -241,14 +245,10 @@ static LARGE_INTEGER fpsLastTime = {};     // last time we updated FPS display
 static int fpsFrameCount = 0;             // frames since last update
 
 // Frame limiter
-// TODO: Add this as a toggle in the dialog box.
-
 //A note about frame rate.  The particle fire screensaver is set to 25fps.
 //But particle toy runs smoother than that.  It's either 60fps, or the screen's
 //refresh rate.  We won't know with decompiling it... or doing some screen recording
 
-static bool useFrameLimiter = false;
-static bool useOriginalSpeed = true;   // Sleep(1) each frame to match original's loop pacing
 static int gRefreshRate = 60;                       // detected monitor refresh rate
 static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
 static LARGE_INTEGER gLastFrameTime = {};           // when last frame completed
@@ -277,10 +277,6 @@ static void UpdateRefreshRate(HWND hwnd)
     gTargetFrameTime = 1.0 / (double)gRefreshRate;
 }
 
-// Palette configuration
-// TODO: Add color scheme selector and nitro toggle to the dialog box.
-static bool useNitro = false;  // boost blue at high heat for white-hot effect
-
 // Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
 struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
 static const ColorScheme PALETTE_PRESETS[] = {
@@ -292,7 +288,6 @@ static const ColorScheme PALETTE_PRESETS[] = {
     { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
 };
 static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
-static int currentPalette = 0;
 
 // ------------------------------------------------------------
 // BuildPalette: two-color spread palette with optional "nitro" boost.
@@ -429,6 +424,60 @@ static void SpawnParticlesRandom(int count)
         float y = (float)(3 + (int)(rng() % (gH - 6)));   // inset 3px
         EmitParticle(x, y, 0.0f);                          // zero velocity — gravity builds speed naturally
     }
+}
+
+// ------------------------------------------------------------
+// Fullscreen toggle: borderless window covering the current monitor.
+// WM_SIZE fires automatically on the resize, so ChangeResolution
+// picks up the new dimensions without any extra work here.
+// ------------------------------------------------------------
+static bool  gIsFullscreen    = false;
+static DWORD gSavedStyle      = 0;
+static RECT  gSavedWindowRect = {};
+
+static void ToggleFullscreen(HWND hwnd)
+{
+    if (!gIsFullscreen)
+    {
+        // Save current windowed state
+        gSavedStyle = (DWORD)GetWindowLong(hwnd, GWL_STYLE);
+        GetWindowRect(hwnd, &gSavedWindowRect);
+
+        // Find the monitor this window lives on
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+
+        // Strip title bar and borders, cover the full monitor
+        SetWindowLong(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(hwnd, HWND_TOP,
+            mi.rcMonitor.left,
+            mi.rcMonitor.top,
+            mi.rcMonitor.right  - mi.rcMonitor.left,
+            mi.rcMonitor.bottom - mi.rcMonitor.top,
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+
+        if (gControlPanel) ShowWindow(gControlPanel, SW_HIDE);
+        gIsFullscreen = true;
+    }
+    else
+    {
+        // Restore saved style and window rect
+        SetWindowLong(hwnd, GWL_STYLE, gSavedStyle);
+        SetWindowPos(hwnd, nullptr,
+            gSavedWindowRect.left,
+            gSavedWindowRect.top,
+            gSavedWindowRect.right  - gSavedWindowRect.left,
+            gSavedWindowRect.bottom - gSavedWindowRect.top,
+            SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+
+        if (gControlPanel) ShowWindow(gControlPanel, SW_SHOW);
+        gIsFullscreen = false;
+    }
+
+    // Keep the checkbox in sync regardless of which path triggered the toggle
+    if (gControlPanel)
+        CheckDlgButton(gControlPanel, IDC_CHECK_FULLSCREEN,
+                       gIsFullscreen ? BST_CHECKED : BST_UNCHECKED);
 }
 
 // ------------------------------------------------------------
@@ -1218,6 +1267,11 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             }
         }
 
+        if (controlId == IDC_CHECK_FULLSCREEN && notifyCode == BN_CLICKED)
+        {
+            ToggleFullscreen(GetParent(hDlg));
+        }
+
         if (controlId == IDC_CHECK_ORIGSPEED && notifyCode == BN_CLICKED)
         {
             useOriginalSpeed = (IsDlgButtonChecked(hDlg, IDC_CHECK_ORIGSPEED) == BST_CHECKED);
@@ -1288,8 +1342,8 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
     }
 
     case WM_CLOSE:
-        // Hide instead of destroy - user can reopen later
-        ShowWindow(hDlg, SW_HIDE);
+        // Closing the control panel closes the whole app
+        PostMessage(GetParent(hDlg), WM_CLOSE, 0, 0);
         return TRUE;
     }
 
@@ -1408,9 +1462,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         rightMouseDown = false;
         return 0;
 
+    case WM_SYSKEYDOWN:
+        // Alt+Enter: classic fullscreen toggle
+        if (wParam == VK_RETURN && (lParam & (1 << 29)))
+            ToggleFullscreen(hwnd);
+        return 0;
+
     case WM_KEYDOWN:
     {
-        if (wParam == VK_SPACE)
+        if (wParam == VK_F12)
+        {
+            ToggleFullscreen(hwnd);
+        }
+        else if (wParam == VK_ESCAPE && gIsFullscreen)
+        {
+            ToggleFullscreen(hwnd);
+        }
+        else if (wParam == VK_SPACE)
         {
             // Freeze all particles
             for (size_t i = 0; i < particles.size(); i++)
