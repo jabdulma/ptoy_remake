@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ptoy-remake.vcxproj" Id="b3d2ee59-bad8-4863-bc7e-3f626775030f" />
+</Solution>

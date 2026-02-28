@@ -1,0 +1,65 @@
+Good — analysis file is complete. Now let me review your code. I already read MakeFireTest.cpp at the start of the
+  session, so I have it fresh. Here's my honest assessment:
+
+  ---
+  What you got exactly right
+
+  - Steering rate: STEER_RATE = 0.05 — matches the original's angle_diff * 0.05 precisely
+  - Bounce energy: BOUNCE = 0.95 — exact match
+  - Diffusion direction: writing to rowAbove[x], reading from row below — correct
+  - Architecture: separate heat buffer + 32-bit display buffer is functionally equivalent to the original's 8-bit
+  palette approach
+  - Two bottom-row modes: random and Perlin — correct, though the random implementation differs
+
+  ---
+  Meaningful differences from the original
+
+  Aspect: BURNFADE
+  Your Remake: 4
+  Original: 6 — original fades faster
+  ────────────────────────────────────────
+  Aspect: Diffusion clamp
+  Your Remake: result < 0 → 0
+  Original: result < 1 → 0 — original is slightly more aggressive
+  ────────────────────────────────────────
+  Aspect: Sparkle threshold
+  Your Remake: 40, fixed +80 boost, 1 pixel
+  Original: 32–127 range, doubles value, spreads to 4 neighbors
+  ────────────────────────────────────────
+  Aspect: Bottom row random
+  Your Remake: Each pixel independently 0–255
+  Original: Walking random — each pixel influenced by previous, much smoother
+  ────────────────────────────────────────
+  Aspect: Particle spawn
+  Your Remake: Random velocity from EmitFirework
+  Original: Zero velocity — motion added by mode system
+  ────────────────────────────────────────
+  Aspect: Particle heat range
+  Your Remake: 180–255
+  Original: 128–255 — original is cooler at spawn
+  ────────────────────────────────────────
+  Aspect: Wall margins
+  Your Remake: 0/width, 0/height
+  Original: 5/width-5 (x), 3/height-3 (y)
+  ────────────────────────────────────────
+  Aspect: Particle rendering
+  Your Remake: DepositHeatLine square deposit
+  Original: Bresenham + 3-pixel wide with dim lookup table
+  ────────────────────────────────────────
+  Aspect: Auto mode cycling
+  Your Remake: Not implemented
+  Original: 40-second timer, 4 modes
+
+  ---
+  The most impactful difference is the bottom row random walk. The original's correlated walk (each pixel drifts ±32
+  from its neighbor) produces a smooth, wave-like flame base. Your uniform 0–255 random produces a much more chaotic,
+  spiky base. That's probably the single biggest visual difference you'd notice.
+
+  Second most impactful: BURNFADE 4 vs 6 — your fire lingers longer and is less aggressive. Easy one-line fix if you
+  want to match.
+
+  The sparkle spread is also noticeable — original writes to 4 neighbors so sparks have a cross shape and feel more
+  physical.
+
+  Everything else is solid. The architecture is clean and in some ways better than the original (32-bit color gives you
+  more palette flexibility, SIMD diffusion is a genuine improvement).

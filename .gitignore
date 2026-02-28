@@ -1,3 +1,31 @@
+#Visual Studio
+.vs
+
+# Visual Studio build output
+Debug/
+Release/
+x64/
+x86/
+build/
+out/
+
+# VS intermediate files
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.log
+*.tlog
+*.res
+*.recipe
+
+# VS user-specific files
+*.user
+*.suo
+*.opensdf
+*.VC.db
+
+
 # Prerequisites
 *.d
 
@@ -39,3 +67,13 @@
 
 # debug information files
 *.dwo
+
+# VS resource editor cache
+*.aps
+
+# Empty build artifact directory
+ptoy-remake/
+
+# AI coding assistants
+.claude/
+.codex/
