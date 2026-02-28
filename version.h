@@ -1,7 +1,7 @@
 #pragma once
 
-#define VER_MAJOR 1
-#define VER_MINOR 0
+#define VER_MAJOR 0
+#define VER_MINOR 9
 #define VER_PATCH 0
 
 // Stringify helpers — lets you write VERSION_STRING_W in a string literal
