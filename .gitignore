@@ -77,3 +77,7 @@ ptoy-remake/
 # AI coding assistants
 .claude/
 .codex/
+
+# Original/decompiled source - keep off GitHub
+og_code.txt
+ogcode/
