@@ -7,12 +7,16 @@
 #include <cmath>
 #include <random>
 #include <vector>
+#include <algorithm>
 #include <windowsx.h>
+#include <commctrl.h>
 #include <intrin.h>
 #include <immintrin.h>
+#pragma comment(lib, "comctl32.lib")
 
 #include "particle.h"
 #include "Resource.h"
+#include "version.h"
 
 // ============================================================
 // SIMULATION SETTINGS
@@ -45,6 +49,7 @@ static bool  usePerlinFire       = false;    // IDC_PERLIN_FIRE
 static bool  useRandEvents       = false;     // IDC_CHECK_RANDEVENT
 static bool  useSparkles         = true;     // future: sparkle toggle
 static bool  useFrameLimiter     = false;    // future: frame rate limiter
+static bool  useStartupEmitter   = true;     // directed bottom-center burst on spawn
 
 // ============================================================
 // ENGINE INTERNALS
@@ -119,14 +124,21 @@ static bool rightMouseDown = false;
 static HWND gControlPanel = nullptr;
 
 // Simulation constants
-static const int BORDER_MARGIN = 1;   // skip 1-pixel border for bounds safety
-static const int BURNFADE      = 6;   // heat decay rate per frame
+static const float PI           = 3.14159265f;
+static const int   BORDER_MARGIN = 1;   // skip 1-pixel border for bounds safety
+static const int   BURNFADE      = 6;   // heat decay rate per frame
 
 // Particle steering
 static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped particles a direction
 
 // Random events timer
 static time_t gLastRandEventSec = 0; // wall-clock second of last event check
+
+// Startup burst drip-feed state
+struct PendingParticle { Particle p; float delay; };
+static std::vector<PendingParticle> gPendingBurst;
+static LARGE_INTEGER gBurstStartTime = {};
+static int gPendingBurstIdx  = 0;
 
 // ------------------------------------------------------------
 // 2D value noise matching original's PerlinNoise (FUN_00404550)
@@ -228,6 +240,8 @@ static void DiffuseSSE2();
 static DiffusionFunc diffuseHeat = DiffuseScalar;
 static void EmitParticle(float x, float y, float speed);
 static void SpawnParticlesRandom(int count);
+static void EmitStartupBurst(int count);
+static void SpawnParticles(int count);
 
 // ------------------------------------------------------------
 // CPU feature detection
@@ -406,8 +420,7 @@ static void InitBackbuffer(HWND hwnd)
     else
         diffuseHeat = DiffuseScalar;
 
-    // Spawn particles randomly across the screen with zero velocity (matching original)
-    SpawnParticlesRandom(INITIAL_PARTICLE_RESERVE);
+    SpawnParticles(INITIAL_PARTICLE_RESERVE);
 }
 
 // ------------------------------------------------------------
@@ -422,7 +435,95 @@ static void SpawnParticlesRandom(int count)
     {
         float x = (float)(5 + (int)(rng() % (gW - 10)));  // inset 5px (matching original)
         float y = (float)(3 + (int)(rng() % (gH - 6)));   // inset 3px
-        EmitParticle(x, y, 0.0f);                          // zero velocity — gravity builds speed naturally
+        EmitParticle(x, y, 0);
+    }
+}
+
+// ------------------------------------------------------------
+// EmitStartupBurst: directed spawn from bottom-center.
+// Particles fan downward in a ±45° spread, bounce off the floor,
+// and rise naturally — giving a satisfying ignition effect on launch.
+// Speed is modest so particles linger at the bottom briefly before
+// bouncing. Toggle via useStartupEmitter; tie to a control later.
+// ------------------------------------------------------------
+static void EmitStartupBurst(int count)
+{
+    particles.clear();
+    particles.reserve(count);  // pre-reserve so drip-feed doesn't reallocate repeatedly
+
+    gPendingBurst.clear();
+    gPendingBurst.reserve(count);
+
+    const float cx        = gW * 0.5f;
+    const float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier * 0.2f;
+    const float SPREAD    = PI * 0.25f;  // ±45° around straight down
+    const float DURATION  = 0.75f;       // seconds over which all particles spawn
+
+    for (int i = 0; i < count; i++)
+    {
+        // Bottom-center with small horizontal jitter; 4–8% above the floor
+        float x = cx + (chance(rng) * 2.0f - 1.0f) * gW * 0.05f;
+        float y = gH * (0.92f + chance(rng) * 0.04f);
+
+        // Fan downward: PI/2 is straight down in screen coords (y increases down)
+        float angle = (PI * 0.5f) + (chance(rng) * 2.0f - 1.0f) * SPREAD;
+        float speed = baseSpeed * speedVariance(rng);
+
+        Particle p  = {};
+        p.x         = x;
+        p.y         = y;
+        p.dx        = cosf(angle) * speed;
+        p.dy        = sinf(angle) * speed;
+        p.heat      = 128 + (dist(rng) % 128);
+        p.color     = 0x00FFFFFF;
+        p.active    = true;
+        p.leaderIdx = -1;
+
+        PendingParticle pp;
+        pp.p     = p;
+        pp.delay = chance(rng) * DURATION;  // random spawn time within the window
+        gPendingBurst.push_back(pp);
+    }
+
+    // Sort by delay so DrainPendingBurst can walk forward with a simple index
+    std::sort(gPendingBurst.begin(), gPendingBurst.end(),
+        [](const PendingParticle& a, const PendingParticle& b) { return a.delay < b.delay; });
+
+    QueryPerformanceCounter(&gBurstStartTime);
+    gPendingBurstIdx = 0;
+}
+
+// ------------------------------------------------------------
+// SpawnParticles: dispatcher — selects spawn mode based on
+// useStartupEmitter. Add new modes here as they're implemented.
+// ------------------------------------------------------------
+static void SpawnParticles(int count)
+{
+    if (useStartupEmitter)
+        EmitStartupBurst(count);
+    else
+        SpawnParticlesRandom(count);
+}
+
+// ------------------------------------------------------------
+// DrainPendingBurst: called once per frame. Moves any particles
+// whose delay has elapsed from the pending list into the live
+// particles vector. No-ops instantly when the burst is complete.
+// ------------------------------------------------------------
+static void DrainPendingBurst()
+{
+    if (gPendingBurstIdx >= (int)gPendingBurst.size()) return;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    float elapsed = (float)(now.QuadPart - gBurstStartTime.QuadPart)
+                  / (float)fpsFrequency.QuadPart;
+
+    while (gPendingBurstIdx < (int)gPendingBurst.size() &&
+           gPendingBurst[gPendingBurstIdx].delay <= elapsed)
+    {
+        particles.push_back(gPendingBurst[gPendingBurstIdx].p);
+        gPendingBurstIdx++;
     }
 }
 
@@ -480,6 +581,15 @@ static void ToggleFullscreen(HWND hwnd)
                        gIsFullscreen ? BST_CHECKED : BST_UNCHECKED);
 }
 
+// Update the live resolution label in the control panel.
+static void UpdateResDisplay()
+{
+    if (!gControlPanel) return;
+    wchar_t buf[32];
+    swprintf_s(buf, L"%d x %d", gW, gH);
+    SetDlgItemText(gControlPanel, IDC_RESLIVE, buf);
+}
+
 // ------------------------------------------------------------
 // ChangeResolution: tear down and rebuild the buffers at a new size,
 // then resize the main window to match (accounting for decorations).
@@ -488,7 +598,8 @@ static void ToggleFullscreen(HWND hwnd)
 // ------------------------------------------------------------
 static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
 {
-    int particleCount = (int)particles.size();
+    int particleCount = (int)particles.size()
+                      + (int)(gPendingBurst.size() - gPendingBurstIdx);
 
     // --- Free old buffers ---
     if (gHeat)      { VirtualFree(gHeat, 0, MEM_RELEASE); gHeat = nullptr; }
@@ -537,7 +648,9 @@ static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
     }
 
     // --- Respawn particles at positions valid for the new buffer ---
-    SpawnParticlesRandom(particleCount > 0 ? particleCount : INITIAL_PARTICLE_RESERVE);
+    SpawnParticles(particleCount > 0 ? particleCount : INITIAL_PARTICLE_RESERVE);
+
+    UpdateResDisplay();
 }
 
 // ------------------------------------------------------------
@@ -673,7 +786,6 @@ static const float KICK_STRENGTH = 0.5f;    // max random perpendicular kick on 
 
 // Attraction steering: how fast particles turn toward their target (0.0 = no turn, 1.0 = instant)
 static const float STEER_RATE = 0.05f;
-static const float PI = 3.14159265f;
 
 // ------------------------------------------------------------
 // SteerParticles: rotate each particle's velocity toward its target.
@@ -959,6 +1071,9 @@ static void RenderFire(HWND hwnd)
 {
     if (!pixelMem || !gHeat) return;
 
+    // Drip-feed pending startup burst particles into the live array
+    DrainPendingBurst();
+
     // ----------------------------
     // Convert window mouse coords -> buffer coords (bx,by)
     // ----------------------------
@@ -1188,6 +1303,73 @@ static void RenderFire(HWND hwnd)
 }
 
 // ------------------------------------------------------------
+// Control panel hover hints
+// Hovering over a labeled control swaps IDC_CONTROLSTEXT for a
+// short description. Mouse-out restores the original key-bindings
+// text. Uses SetWindowSubclass so each control can self-clean on
+// WM_NCDESTROY.
+// ------------------------------------------------------------
+
+static const wchar_t* const gControlsDefaultText =
+    L"Space: Freeze\r\n"
+    L"Enter: Comet\r\n"
+    L"Backspace: Emit\r\n"
+    L"Left Mouse: Follow Pointer\r\n"
+    L"Right Mouse: Explosion";
+
+struct ControlHint { int id; const wchar_t* text; };
+static const ControlHint gControlHints[] =
+{
+    { IDC_CHECK_GRAVITY,   L"Gravity\r\nParticles are affected by gravity when enabled." },
+    { IDC_FOLLOWLEADER,    L"Follow the Leader\r\nA random particle is chosen as leader and all others follow it." },
+    { IDC_MULTILEADER,     L"Multiple Leaders\r\nMultiple leaders chosen for Follow the Leader. No effect if Follow the Leader isn't enabled." },
+    { IDC_PERLIN_FIRE,     L"Perlin Fire\r\nBottom fire is made using Ken Perlin's noise algorithm. Looks smoother and \"blobby\"." },
+    { IDC_CHECK_RANDEVENT, L"Rand Events\r\nFreeze, comet, emit, and gravity changes will occur randomly." },
+    { IDC_CHECK_SIMD,      L"SSE2 Optimization\r\nPerforms an SSE2 optimization allowing multiple buffer pixels to be processed at once. Speed boost!" },
+    { IDC_CHECK_ORIGSPEED, L"Original Speed\r\nWhen checked, computes the buffer with the same speed as the original. Uncheck for a modest speed boost." },
+};
+
+// Tracks which control is currently showing a hint so a deferred
+// WM_MOUSELEAVE from an already-vacated control doesn't clobber
+// a hint that was just set by the newly-entered control.
+static HWND gCurrentHintCtrl = nullptr;
+
+struct HintSubclassData { HWND hDlg; const wchar_t* text; };
+
+static LRESULT CALLBACK HintSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                          UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
+{
+    auto* d = reinterpret_cast<HintSubclassData*>(dwRefData);
+
+    if (msg == WM_MOUSEMOVE)
+    {
+        if (gCurrentHintCtrl != hwnd)
+        {
+            gCurrentHintCtrl = hwnd;
+            SetDlgItemText(d->hDlg, IDC_CONTROLSTEXT, d->text);
+        }
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+    }
+    else if (msg == WM_MOUSELEAVE)
+    {
+        if (gCurrentHintCtrl == hwnd)
+        {
+            gCurrentHintCtrl = nullptr;
+            SetDlgItemText(d->hDlg, IDC_CONTROLSTEXT, gControlsDefaultText);
+        }
+    }
+    else if (msg == WM_NCDESTROY)
+    {
+        RemoveWindowSubclass(hwnd, HintSubclassProc, uIdSubclass);
+        delete d;
+        return 0;
+    }
+
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+// ------------------------------------------------------------
 // Control panel dialog procedure
 // ------------------------------------------------------------
 INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1197,7 +1379,7 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
     case WM_INITDIALOG:
     {
         // Set default particle count
-        SetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, 2000, FALSE);
+        SetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, INITIAL_PARTICLE_RESERVE, FALSE);
 
         // Populate resolution dropdown.
         // Use CB_INSERTSTRING (not CB_ADDSTRING) to preserve order despite CBS_SORT on the control.
@@ -1216,25 +1398,38 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Burning Pink");
         SendMessage(hCombo, CB_SETCURSEL, currentPalette, 0);
 
-        // Original speed on by default
-        CheckDlgButton(hDlg, IDC_CHECK_ORIGSPEED, BST_CHECKED);
-
-        // Check SIMD by default (matches useSIMD initial value)
-        //CheckDlgButton(hDlg, IDC_CHECK_SIMD, BST_CHECKED);
-
-        // Check these on by default (matching their initial values above)
-        CheckDlgButton(hDlg, IDC_CHECK_GRAVITY,  BST_CHECKED);
-        CheckDlgButton(hDlg, IDC_FOLLOWLEADER,   BST_CHECKED);
-        CheckDlgButton(hDlg, IDC_MULTILEADER,    BST_CHECKED);
-        CheckDlgButton(hDlg, IDC_CHECK_RANDEVENT, BST_CHECKED);
+        // Sync all checkboxes to their corresponding variables in SIMULATION SETTINGS.
+        // Change defaults there and the UI follows automatically.
+#define SYNC_CHECK(id, var) CheckDlgButton(hDlg, id, (var) ? BST_CHECKED : BST_UNCHECKED)
+        SYNC_CHECK(IDC_CHECK_ORIGSPEED,  useOriginalSpeed);
+        SYNC_CHECK(IDC_CHECK_SIMD,       useSIMD);
+        SYNC_CHECK(IDC_CHECK_GRAVITY,    useGravity);
+        SYNC_CHECK(IDC_FOLLOWLEADER,     useFollowLeader);
+        SYNC_CHECK(IDC_MULTILEADER,      useMultiLeader);
+        SYNC_CHECK(IDC_PERLIN_FIRE,      usePerlinFire);
+        SYNC_CHECK(IDC_CHECK_RANDEVENT,  useRandEvents);
+        SYNC_CHECK(IDC_CHECK_FULLSCREEN, gIsFullscreen);
+#undef SYNC_CHECK
 
         // Set controls reference text
-        SetDlgItemText(hDlg, IDC_CONTROLSTEXT,
-            L"Space: Freeze\r\n"
-            L"Enter: Comet\r\n"
-            L"Backspace: Emit\r\n"
-            L"Left Mouse: Follow Pointer\r\n"
-            L"Right Mouse: Explosion");
+        SetDlgItemText(hDlg, IDC_CONTROLSTEXT, gControlsDefaultText);
+
+        // Wire up hover hints for labeled controls
+        for (auto& hint : gControlHints)
+        {
+            HWND hCtrl = GetDlgItem(hDlg, hint.id);
+            if (hCtrl)
+            {
+                auto* d = new HintSubclassData{ hDlg, hint.text };
+                SetWindowSubclass(hCtrl, HintSubclassProc, 0, reinterpret_cast<DWORD_PTR>(d));
+            }
+        }
+
+        // Show current buffer resolution. gControlPanel isn't assigned yet
+        // (WM_INITDIALOG fires during CreateDialog), so use hDlg directly.
+        wchar_t resBuf[32];
+        swprintf_s(resBuf, L"%d x %d", gW, gH);
+        SetDlgItemText(hDlg, IDC_RESLIVE, resBuf);
 
         return TRUE;
     }
@@ -1319,7 +1514,8 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             if (ok && count > 0)
             {
                 if (count > MAX_PARTICLES) count = MAX_PARTICLES;
-                int current = (int)particles.size();
+                int current = (int)particles.size()
+                            + (int)(gPendingBurst.size() - gPendingBurstIdx);
                 if (count > current)
                 {
                     // Grow: append new particles at random positions with zero velocity
@@ -1454,7 +1650,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         float bx = (float)mx * gW / (winW ? winW : 1);
         float by = (float)my * gH / (winH ? winH : 1);
 
-        EmitFirework(bx, by, particles.size());
+        EmitFirework(bx, by, (int)particles.size());
         return 0;
     }
 
@@ -1557,7 +1753,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int nCmdShow)
 {
     const wchar_t* cls = L"PToyRemakeClass";
 
@@ -1580,7 +1776,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
     HWND hwnd = CreateWindowEx(
         0,
         cls,
-        L"Particle Toy: Remake - Have fun!",
+        L"Burning Particles Remake v" VERSION_STRING_W,
         style,
         CW_USEDEFAULT, CW_USEDEFAULT, windowWidth, windowHeight,
         nullptr, nullptr, hInstance, nullptr

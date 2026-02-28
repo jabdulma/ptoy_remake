@@ -37,6 +37,8 @@
 #define IDC_CONTROLSTEXT                1027
 #define IDFPSLABEL                      1028
 #define IDC_FPSLIVE                     1029
+#define IDC_RESLABLE                    1030
+#define IDC_RESLIVE                     1031
 #define IDC_STATIC                      -1
 
 // Next default values for new objects

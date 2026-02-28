@@ -4,14 +4,14 @@
 
 ## Release 1.0
 
-- [ ] **Particle count wired up** - Wire `IDC_EDIT_PARTICLES` so changing the value respawns particles at the new count.
+- [X] **Particle count wired up** - Wire `IDC_EDIT_PARTICLES` so changing the value respawns particles at the new count.
 - [X] **Fullscreen toggle** - F12 hotkey + `IDC_CHECK_FULLSCREEN` checkbox. Save pre-fullscreen style/rect, strip title bar, `SetWindowPos` to cover the monitor. Restore on toggle. Buffer adapts automatically via `WM_SIZE`.
 - [X] **Original speed mode** - Replace the bounce toggle with an "Original Speed" checkbox. Puts a `Sleep(1)` in the render loop to match the original's frame pacing. The `Sleep(1)` is already in the code (commented out) — need to decide exact placement with John before wiring it up.
-- [ ] **Original speed default** - Set to default on.
-- [ ] **Resolution display** - Show current buffer dimensions in the control panel (e.g. `"1920 x 1080"`) using a static text label, updated on each resize. Same pattern as the live FPS counter.
+- [X] **Original speed default** - Set to default on.
+- [X] **Resolution display** - Show current buffer dimensions in the control panel (e.g. `"1920 x 1080"`) using a static text label, updated on each resize. Same pattern as the live FPS counter.
 - [X] **Closing the controls window closes the app** - Currently the control panel hides on close (`WM_CLOSE` returns `SW_HIDE`). For 1.0, closing it should post `WM_CLOSE` to the main window instead, so the two windows feel like one application.
 - [ ] **Release build / GitHub Action** - Create a GitHub Action that produces a signed/zipped binary on every push to `master`.
-- [ ] **Help System** - Create a way to show descriptions for each toggle.  Ideas include Window's help system, or temporarily replacing the controls text.
+- [X] **Help System** - Create a way to show descriptions for each toggle.  Ideas include Window's help system, or temporarily replacing the controls text.
 - [ ] **Github Actions** - Create a github actions pipeline to build the releases.
 ---
 
