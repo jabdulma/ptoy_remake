@@ -36,7 +36,7 @@ static float userSpeedMultiplier = 0.5f;     // future: speed slider
 static int   particleSize        = 2;        // future: size slider
 
 // Behavior toggles
-static bool  useOriginalSpeed    = true;     // IDC_CHECK_ORIGSPEED  — Sleep(1) loop pacing
+static bool  useOriginalTiming   = true;     // IDC_CHECK_ORIGSPEED  — Sleep(1) loop pacing
 static bool  useOriginalSpeeds   = true;     // speed mode: absolute pixel/frame vs relative
 static bool  useSIMD             = false;    // IDC_CHECK_SIMD
 static bool  useGravity          = false;     // IDC_CHECK_GRAVITY
@@ -73,7 +73,7 @@ static const ResPreset RES_PRESETS[] = {
     { 2560, 1440, L"2560 x 1440  (John's Desktop)"      },
     { 3440, 1440, L"3440 x 1440  (Ultrawide)"           },
     { 3840, 2160, L"3840 x 2160  (4K!!!)"               },
-    { 3840, 2160, L"4000 x 4000  (Cover all monitors)"  },
+    { 4000, 4000, L"4000 x 4000  (Cover all monitors)"  },
 };
 static const int NUM_RES_PRESETS = _countof(RES_PRESETS);
 
@@ -105,7 +105,10 @@ static float       PARTICLE_SPEED_FACTOR = 0.01f;  // active speed factor (recal
 static void UpdateSpeedFactor()
 {
     if (useOriginalSpeeds)
-        PARTICLE_SPEED_FACTOR = ORIGINAL_BASE_SPEED / (gW * userSpeedMultiplier);
+    {
+        float denom = (float)gW * userSpeedMultiplier;
+        PARTICLE_SPEED_FACTOR = (denom > 0.0f) ? ORIGINAL_BASE_SPEED / denom : DEFAULT_SPEED_FACTOR;
+    }
     else
         PARTICLE_SPEED_FACTOR = DEFAULT_SPEED_FACTOR;
 }
@@ -291,15 +294,15 @@ static void UpdateRefreshRate(HWND hwnd)
     gTargetFrameTime = 1.0 / (double)gRefreshRate;
 }
 
-// Preset color schemes: { midpoint color (Color 1), bright color (Color 2) }
-struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; };
+// Preset color schemes: { midpoint color (Color 1), bright color (Color 2), display name }
+struct ColorScheme { uint8_t r1, g1, b1, r2, g2, b2; const wchar_t* name; };
 static const ColorScheme PALETTE_PRESETS[] = {
-    { 255, 128,   0,  255, 255,   0 },  // 0: Fiery Orange (original default)
-    {   0, 128, 255,    0, 255, 255 },  // 1: Skyish Teal
-    {  64,  64, 128,  192, 192, 255 },  // 2: Velvet Blue
-    {   0, 255,   0,  255, 255,  55 },  // 3: Terry's Green
-    {  32, 128,  32,  160, 255, 160 },  // 4: Slimy Green
-    { 255,  64,  64,  255, 192, 192 },  // 5: Burning Pink
+    { 255, 128,   0,  255, 255,   0,  L"Fiery Orange"  },  // 0: original default
+    {   0, 128, 255,    0, 255, 255,  L"Skyish Teal"   },
+    {  64,  64, 128,  192, 192, 255,  L"Velvet Blue"   },
+    {   0, 255,   0,  255, 255,  55,  L"Terry's Green" },
+    {  32, 128,  32,  160, 255, 160,  L"Slimy Green"   },
+    { 255,  64,  64,  255, 192, 192,  L"Burning Pink"  },
 };
 static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
 
@@ -717,7 +720,7 @@ static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t 
     int sy  = (y0 < y1) ? 1 : -1;
     int err = dx - dy;
 
-    for (;;)
+    for (;;) //Run this infinite loop until we're at the target
     {
         // 3-pixel vertical strip at (x0, y0): center, above, below.
         // Unsigned cast turns negative coords into large values, failing the < gW/gH check — safe one-shot bounds test.
@@ -733,43 +736,6 @@ static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t 
         int e2 = 2 * err;
         if (e2 > -dy) { err -= dy; x0 += sx; }
         if (e2 <  dx) { err += dx; y0 += sy; }
-    }
-}
-
-// ------------------------------------------------------------
-// DepositHeatLineHeavy: original float-based line draw (kept for comparison).
-// draw a line of heat from (x0,y0) to (x1,y1)
-// ------------------------------------------------------------
-static void DepositHeatLineHeavy(float x0, float y0, float x1, float y1, uint8_t heat)
-{
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float dist = sqrtf(dx * dx + dy * dy);
-
-    // Number of steps = distance, so we deposit at least once per pixel
-    int steps = (int)dist + 1;
-
-    for (int i = 0; i <= steps; i++)
-    {
-        float t = (steps > 0) ? (float)i / steps : 0.0f;
-        int ix = (int)(x0 + dx * t);
-        int iy = (int)(y0 + dy * t);
-
-        // Deposit heat in a square around this point
-        int half = particleSize / 2;
-        for (int oy = -half; oy < particleSize - half; oy++)
-        {
-            for (int ox = -half; ox < particleSize - half; ox++)
-            {
-                int hx = ix + ox;
-                int hy = iy + oy;
-                if ((unsigned)hx < (unsigned)gW && (unsigned)hy < (unsigned)gH)
-                {
-                    uint8_t& h = gHeat[hy * gW + hx];
-                    if (heat > h) h = heat;
-                }
-            }
-        }
     }
 }
 
@@ -1299,7 +1265,7 @@ static void RenderFire(HWND hwnd)
     // Original speed mode: Sleep(1) each frame to match the original ptoy's loop pacing.
     // The original called Sleep(1) unconditionally in its main loop, which on Windows
     // yields ~15ms (one timer tick), capping it to roughly 60fps on period hardware.
-    if (useOriginalSpeed) Sleep(1);
+    if (useOriginalTiming) Sleep(1);
 }
 
 // ------------------------------------------------------------
@@ -1388,20 +1354,16 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             SendMessage(hResCombo, CB_INSERTSTRING, (WPARAM)i, (LPARAM)RES_PRESETS[i].label);
         SendMessage(hResCombo, CB_SETCURSEL, (WPARAM)currentResPreset, 0);
 
-        // Populate palette dropdown (names match PALETTE_PRESETS order)
+        // Populate palette dropdown from PALETTE_PRESETS
         HWND hCombo = GetDlgItem(hDlg, IDC_COMBO_PALETTE);
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Fiery Orange");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Skyish Teal");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Velvet Blue");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Terry's Green");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Slimy Green");
-        SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Burning Pink");
+        for (int i = 0; i < NUM_PALETTE_PRESETS; i++)
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)PALETTE_PRESETS[i].name);
         SendMessage(hCombo, CB_SETCURSEL, currentPalette, 0);
 
         // Sync all checkboxes to their corresponding variables in SIMULATION SETTINGS.
         // Change defaults there and the UI follows automatically.
 #define SYNC_CHECK(id, var) CheckDlgButton(hDlg, id, (var) ? BST_CHECKED : BST_UNCHECKED)
-        SYNC_CHECK(IDC_CHECK_ORIGSPEED,  useOriginalSpeed);
+        SYNC_CHECK(IDC_CHECK_ORIGSPEED,  useOriginalTiming);
         SYNC_CHECK(IDC_CHECK_SIMD,       useSIMD);
         SYNC_CHECK(IDC_CHECK_GRAVITY,    useGravity);
         SYNC_CHECK(IDC_FOLLOWLEADER,     useFollowLeader);
@@ -1450,8 +1412,7 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
                                  true);  // resize window to match
             }
         }
-
-        if (controlId == IDC_COMBO_PALETTE && notifyCode == CBN_SELCHANGE)
+        else if (controlId == IDC_COMBO_PALETTE && notifyCode == CBN_SELCHANGE)
         {
             int sel = (int)SendDlgItemMessage(hDlg, IDC_COMBO_PALETTE, CB_GETCURSEL, 0, 0);
             if (sel >= 0 && sel < NUM_PALETTE_PRESETS)
@@ -1461,18 +1422,15 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
                 BuildPalette(cs.r1, cs.g1, cs.b1, cs.r2, cs.g2, cs.b2);
             }
         }
-
-        if (controlId == IDC_CHECK_FULLSCREEN && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_CHECK_FULLSCREEN && notifyCode == BN_CLICKED)
         {
             ToggleFullscreen(GetParent(hDlg));
         }
-
-        if (controlId == IDC_CHECK_ORIGSPEED && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_CHECK_ORIGSPEED && notifyCode == BN_CLICKED)
         {
-            useOriginalSpeed = (IsDlgButtonChecked(hDlg, IDC_CHECK_ORIGSPEED) == BST_CHECKED);
+            useOriginalTiming = (IsDlgButtonChecked(hDlg, IDC_CHECK_ORIGSPEED) == BST_CHECKED);
         }
-
-        if (controlId == IDC_CHECK_SIMD && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_CHECK_SIMD && notifyCode == BN_CLICKED)
         {
             useSIMD = (IsDlgButtonChecked(hDlg, IDC_CHECK_SIMD) == BST_CHECKED);
             if (useSIMD && HasSSE2())
@@ -1480,40 +1438,48 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             else
                 diffuseHeat = DiffuseScalar;
         }
-
-        if (controlId == IDC_PERLIN_FIRE && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_PERLIN_FIRE && notifyCode == BN_CLICKED)
         {
             usePerlinFire = (IsDlgButtonChecked(hDlg, IDC_PERLIN_FIRE) == BST_CHECKED);
         }
-
-        if (controlId == IDC_CHECK_GRAVITY && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_CHECK_GRAVITY && notifyCode == BN_CLICKED)
         {
             useGravity = (IsDlgButtonChecked(hDlg, IDC_CHECK_GRAVITY) == BST_CHECKED);
         }
-
-        if (controlId == IDC_FOLLOWLEADER && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_FOLLOWLEADER && notifyCode == BN_CLICKED)
         {
             useFollowLeader = (IsDlgButtonChecked(hDlg, IDC_FOLLOWLEADER) == BST_CHECKED);
         }
-
-        if (controlId == IDC_MULTILEADER && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_MULTILEADER && notifyCode == BN_CLICKED)
         {
             useMultiLeader = (IsDlgButtonChecked(hDlg, IDC_MULTILEADER) == BST_CHECKED);
         }
-
-        if (controlId == IDC_CHECK_RANDEVENT && notifyCode == BN_CLICKED)
+        else if (controlId == IDC_CHECK_RANDEVENT && notifyCode == BN_CLICKED)
         {
             useRandEvents = (IsDlgButtonChecked(hDlg, IDC_CHECK_RANDEVENT) == BST_CHECKED);
             gLastRandEventSec = time(nullptr);  // reset timer so first event isn't immediate
         }
-
-        if (controlId == IDC_EDIT_PARTICLES && notifyCode == EN_CHANGE)
+        else if (controlId == IDC_EDIT_PARTICLES && notifyCode == EN_CHANGE)
         {
             BOOL ok;
             int count = (int)GetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, &ok, FALSE);
             if (ok && count > 0)
             {
-                if (count > MAX_PARTICLES) count = MAX_PARTICLES;
+                if (count > MAX_PARTICLES)
+                    count = MAX_PARTICLES;
+
+                // Normalize: rewrite the control if the text doesn't match the
+                // canonical integer — catches both the cap case and leading zeros.
+                wchar_t buf[16], expected[16];
+                GetDlgItemText(hDlg, IDC_EDIT_PARTICLES, buf, _countof(buf));
+                swprintf_s(expected, L"%d", count);
+                if (wcscmp(buf, expected) != 0)
+                {
+                    SetDlgItemInt(hDlg, IDC_EDIT_PARTICLES, count, FALSE);
+                    SendDlgItemMessage(hDlg, IDC_EDIT_PARTICLES, EM_SETSEL, 0, -1);
+                    SendDlgItemMessage(hDlg, IDC_EDIT_PARTICLES, EM_SETSEL, -1, -1);
+                }
+
                 int current = (int)particles.size()
                             + (int)(gPendingBurst.size() - gPendingBurstIdx);
                 if (count > current)
@@ -1647,10 +1613,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
 
-        float bx = (float)mx * gW / (winW ? winW : 1);
-        float by = (float)my * gH / (winH ? winH : 1);
+        int bx = mx * gW / (winW ? winW : 1);
+        int by = my * gH / (winH ? winH : 1);
 
-        EmitFirework(bx, by, (int)particles.size());
+        EmitFirework((float)bx, (float)by, (int)particles.size());
         return 0;
     }
 
@@ -1792,8 +1758,11 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ PWSTR, _I
     }
 
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0))
+    BOOL bRet;
+    while ((bRet = GetMessage(&msg, nullptr, 0, 0)) != 0)
     {
+        if (bRet == -1) break;  // unexpected error; bail cleanly
+
         // Let the dialog process its own messages (tab, keyboard, etc.)
         if (gControlPanel && IsDialogMessage(gControlPanel, &msg))
             continue;

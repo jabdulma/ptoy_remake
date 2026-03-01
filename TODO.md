@@ -12,7 +12,7 @@
 - [X] **Closing the controls window closes the app** - Currently the control panel hides on close (`WM_CLOSE` returns `SW_HIDE`). For 1.0, closing it should post `WM_CLOSE` to the main window instead, so the two windows feel like one application.
 - [ ] **Release build / GitHub Action** - Create a GitHub Action that produces a signed/zipped binary on every push to `master`.
 - [X] **Help System** - Create a way to show descriptions for each toggle.  Ideas include Window's help system, or temporarily replacing the controls text.
-- [ ] **Github Actions** - Create a github actions pipeline to build the releases.
+- [X] **Github Actions** - Create a github actions pipeline to build the releases.
 ---
 
 ## Release 1.x
@@ -53,4 +53,66 @@
 
 ## Code Health
 
-- [ ] **Split source file** - `MakeFireTest.cpp` is getting long. Split into logical units (fire sim, particles, UI/dialog, render) as we approach 1.0 feature-complete.
+- [ ] **Split source file** - `MakeFireTest.cpp` is getting long. Split into logical units per the plan below.
+
+---
+
+## File Split Plan
+
+**Context:** `MakeFireTest.cpp` is ~1800 lines. The goal is to split it into focused, readable translation units without restructuring the code or introducing architectural churn.
+
+### Architectural decision — shared state
+
+Nearly every module touches the simulation settings flags, `gW`/`gH`, `gHeat`, and the RNG objects. Rather than scattering definitions or wrapping everything in accessor functions, keep all variable *definitions* in `MakeFireTest.cpp` and introduce a `globals.h` with `extern` declarations. Each new `.cpp` includes `globals.h` to read or write shared state.
+
+### Proposed file layout
+
+| File | What it contains | Approx. lines |
+|------|-----------------|---------------|
+| `globals.h` | `extern` declarations for all shared simulation state; shared struct defs (`ResPreset`, `ColorScheme`, `PendingParticle`, `ControlHint`) | new, ~80 |
+| `perlin.cpp/.h` | `InitPerlinTable()`, `PerlinNoise2D()`, all Perlin tables and constants | extracted, ~60 |
+| `fire_sim.cpp/.h` | `BuildPalette()`, `DiffuseScalar()`, `DiffuseSSE2()`, `HasSSE2()`, `diffuseHeat` pointer, `PALETTE_PRESETS` | extracted, ~200 |
+| `particles.cpp/.h` | `EmitParticle()`, `EmitFirework()`, `SpawnParticles*()`, `DrainPendingBurst()`, `UpdateParticles()`, `SteerParticles()`, `DepositHeatLine[Heavy]()`, speed system, bounce constants | extracted, ~380 |
+| `dialog.cpp` | `ControlPanelProc()`, `HintSubclassProc()`, hover hint data (`gControlsDefaultText`, `gControlHints`, `gCurrentHintCtrl`) | extracted, ~250 |
+| `MakeFireTest.cpp` | All global variable *definitions*, `InitBackbuffer()`, `ChangeResolution()`, `ToggleFullscreen()`, `UpdateResDisplay()`, `UpdateRefreshRate()`, `RenderFire()`, `WndProc()`, `wWinMain()` | trimmed, ~600 |
+
+`RenderFire()` stays in `MakeFireTest.cpp` — it is the master per-frame coordinator that calls into every other module, and its role is clearest when read alongside `WndProc`.
+
+### Extraction order (least-coupled first)
+
+Do each step, build (`msbuild /p:Configuration=Release /p:Platform=x64`), run a quick visual check, then move on. Don't accumulate steps.
+
+- [ ] **Step 1 — `perlin.cpp/.h`**
+  - Move: `gPerlinPerm`, `gPerlinGrad`, `gPerlinY`, `kPerlinAmp`, `kPerlinScale`, `InitPerlinTable()`, `PerlinNoise2D()`
+  - One extern needed: `rng` (defined in MakeFireTest.cpp, declared in `globals.h`)
+  - Verify: Perlin fire mode still produces smooth animated flame base
+
+- [ ] **Step 2 — `fire_sim.cpp/.h`**
+  - Move: `ColorScheme`, `PALETTE_PRESETS`, `NUM_PALETTE_PRESETS`, `BuildPalette()`, `SPARKLE_LOW`/`SPARKLE_HIGH`, `HasSSE2()`, `diffuseHeat` function pointer + `using DiffusionFunc`, `DiffuseScalar()`, `DiffuseSSE2()`
+  - Also extract the inline sparkle block from `RenderFire()` into a `SparkleEffect()` function here — keeps the constants and logic together, and puts the pre-generated table (performance TODO) in the right place when that work happens
+  - Externs needed: `gHeat`, `gW`, `gH`, `gPalette`, `BURNFADE`, `BORDER_MARGIN`, `useSIMD`, `useNitro`, `useSparkles`, `rng`
+  - Verify: fire diffuses, SIMD toggle switches implementations, palette changes work, sparkles still shimmer
+
+- [ ] **Step 3 — `particles.cpp/.h`**
+  - Move: `PendingParticle` struct, `gPendingBurst`, `gBurstStartTime`, `gPendingBurstIdx`, `gFallbackAngle`, speed system constants + `UpdateSpeedFactor()`, bounce/steer constants (`BOUNCE`, `KICK_STRENGTH`, `STEER_RATE`), AltColor state (`useAltColor`, `HEAT_FADE`, `HEAT_FLOOR`, `BOUNCE_BRIGHTEN`), `EmitParticle()`, `EmitFirework()`, `SpawnParticlesRandom()`, `EmitStartupBurst()`, `SpawnParticles()`, `DrainPendingBurst()`, `SteerParticles()`, `UpdateParticles()`, `DepositHeatLine()`, `DepositHeatLineHeavy()`
+  - Externs needed: `gHeat`, `gW`, `gH`, `particles`, `rng` + distributions, all `use*` / gravity flags, `PARTICLE_SPEED_FACTOR`, `fpsFrequency`, `gControlPanel`, `mouseDown`, `rightMouseDown`
+  - Verify: particles move, bounce, deposit heat, startup burst drip-feeds correctly
+
+- [ ] **Step 4 — `dialog.cpp`**
+  - Move: `gControlsDefaultText`, `ControlHint` struct, `gControlHints`, `gCurrentHintCtrl`, `HintSubclassData` struct, `HintSubclassProc()`, `ControlPanelProc()`
+  - Externs needed: essentially everything in `globals.h` (it reads and writes most settings and calls functions from every other module)
+  - The `#pragma comment(lib, "comctl32.lib")` and `#include <commctrl.h>` belong here; remove from `MakeFireTest.cpp`
+  - Verify: all checkboxes, dropdowns, hover hints, particle count edit, and close behavior work
+
+- [ ] **Step 5 — Trim `MakeFireTest.cpp`**
+  - What remains: all global variable definitions, `InitBackbuffer()`, `ChangeResolution()`, `ToggleFullscreen()`, `UpdateResDisplay()`, `UpdateRefreshRate()`, `RenderFire()`, `WndProc()`, `wWinMain()`
+  - Add all new `.cpp` files to `ptoy-remake.vcxproj`
+  - Verify: full release build is clean, no duplicate symbol errors
+
+### Gotchas to watch for
+
+- `rng` and the `dist`/`angleDist`/`speedVariance`/`chance` distribution objects are used by Perlin, fire seeding, and particle spawning — define them once in `MakeFireTest.cpp`, declare `extern` in `globals.h`
+- `PendingParticle` is currently defined inline in `MakeFireTest.cpp`; move its definition to `particles.h` before extracting
+- `ControlPanelProc` calls `ChangeResolution()`, `BuildPalette()`, `SpawnParticles()`, `EmitParticle()`, `ToggleFullscreen()` — those functions must be declared in the headers of the files they move to
+- `BURNFADE` and `BORDER_MARGIN` are `const int` — if used in multiple translation units, declare them `inline constexpr` in `globals.h` or give them external linkage explicitly
+- Forward declarations in `MakeFireTest.cpp` (lines ~238–244) become redundant once proper headers exist — remove them to avoid confusion
