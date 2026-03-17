@@ -83,8 +83,8 @@ static int gH = RES_PRESETS[currentResPreset].h;
 // Rendering buffers
 static BITMAPINFO gBmi      = {};
 static void*      gPixels   = nullptr;      // raw pointer returned by CreateDIBSection
-static uint32_t*  pixelMem  = nullptr;      // typed view of gPixels (uint32 per pixel)
-static HBITMAP    sDibSection = nullptr;    // DIBSection handle; file-scope for ChangeResolution
+static uint32_t*  gPixelMem  = nullptr;      // typed view of gPixels (uint32 per pixel)
+static HBITMAP    gDibSection = nullptr;    // DIBSection handle; file-scope for ChangeResolution
 
 static uint8_t*  gHeat      = nullptr;      // simulation buffer: 1 byte per pixel
 static uint32_t  gPalette[256] = {};        // palette[heat] -> 0x00RRGGBB
@@ -99,7 +99,7 @@ static std::uniform_real_distribution<float> chance(0.0f, 1.0f);           // fo
 // Speed system
 static const float ORIGINAL_BASE_SPEED  = 8.0f;    // original's ~8 px/frame at any resolution
 static const float DEFAULT_SPEED_FACTOR = 0.01f;   // resolution-independent default
-static float       PARTICLE_SPEED_FACTOR = 0.01f;  // active speed factor (recalculated on resize)
+static float       gParticleSpeedFactor = 0.01f;  // active speed factor (recalculated on resize)
 
 // Recalculate speed factor based on mode and current resolution
 static void UpdateSpeedFactor()
@@ -107,21 +107,21 @@ static void UpdateSpeedFactor()
     if (useOriginalSpeeds)
     {
         float denom = (float)gW * userSpeedMultiplier;
-        PARTICLE_SPEED_FACTOR = (denom > 0.0f) ? ORIGINAL_BASE_SPEED / denom : DEFAULT_SPEED_FACTOR;
+        gParticleSpeedFactor = (denom > 0.0f) ? ORIGINAL_BASE_SPEED / denom : DEFAULT_SPEED_FACTOR;
     }
     else
-        PARTICLE_SPEED_FACTOR = DEFAULT_SPEED_FACTOR;
+        gParticleSpeedFactor = DEFAULT_SPEED_FACTOR;
 }
 
 // Particle system
-static std::vector<Particle> particles;
+static std::vector<Particle> gParticles;
 static const int INITIAL_PARTICLE_RESERVE = 2000;
 
 // Mouse state (window client-space coordinates)
 static int  gMouseX       = 1;
 static int  gMouseY       = 1;
-static bool mouseDown     = false;
-static bool rightMouseDown = false;
+static bool gMouseDown     = false;
+static bool gRightMouseDown = false;
 
 // Control panel dialog
 static HWND gControlPanel = nullptr;
@@ -132,7 +132,7 @@ static const int   BORDER_MARGIN = 1;   // skip 1-pixel border for bounds safety
 static const int   BURNFADE      = 6;   // heat decay rate per frame
 
 // Particle steering
-static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped particles a direction
+static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped gParticles a direction
 
 // Random events timer
 static time_t gLastRandEventSec = 0; // wall-clock second of last event check
@@ -240,7 +240,7 @@ static const uint8_t SPARKLE_HIGH = 128;  // only sparkle pixels below this
 using DiffusionFunc = void(*)();
 static void DiffuseScalar();
 static void DiffuseSSE2();
-static DiffusionFunc diffuseHeat = DiffuseScalar;
+static DiffusionFunc gDiffuseHeat = DiffuseScalar;
 static void EmitParticle(float x, float y, float speed);
 static void SpawnParticlesRandom(int count);
 static void EmitStartupBurst(int count);
@@ -313,9 +313,10 @@ static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_
 // 255:     forced white
 // Nitro:   adds blue channel ramp starting at index 200 for white-hot tips
 // ------------------------------------------------------------
-static void BuildPalette(uint8_t r1, uint8_t g1, uint8_t b1,
-                         uint8_t r2, uint8_t g2, uint8_t b2)
+static void BuildPalette(const ColorScheme& cs)
 {
+    uint8_t r1 = cs.r1, g1 = cs.g1, b1 = cs.b1;
+    uint8_t r2 = cs.r2, g2 = cs.g2, b2 = cs.b2;
     for (int i = 0; i < 256; i++)
     {
         int r, g, b;
@@ -372,7 +373,7 @@ static void InitBackbuffer(HWND hwnd)
     ReleaseDC(hwnd, hdc);
 
     // Keep the DIB handle alive for the lifetime of the program.
-    sDibSection = dib;
+    gDibSection = dib;
 
     if (!dib || !gPixels)
     {
@@ -381,7 +382,7 @@ static void InitBackbuffer(HWND hwnd)
     }
 
     // Typed view of the same memory: now we can index pixels as uint32_t.
-    pixelMem = (uint32_t*)gPixels;
+    gPixelMem = (uint32_t*)gPixels;
 
     // Allocate the heat buffer (1 byte per pixel).
     // VirtualAlloc gives page-aligned memory; good for big buffers.
@@ -398,10 +399,10 @@ static void InitBackbuffer(HWND hwnd)
 
     // Build our heat->color palette from current scheme.
     const ColorScheme& cs = PALETTE_PRESETS[currentPalette];
-    BuildPalette(cs.r1, cs.g1, cs.b1, cs.r2, cs.g2, cs.b2);
+    BuildPalette(cs);
 
-    // Reserve space for particles (avoids reallocation during normal use)
-    particles.reserve(INITIAL_PARTICLE_RESERVE);
+    // Reserve space for gParticles (avoids reallocation during normal use)
+    gParticles.reserve(INITIAL_PARTICLE_RESERVE);
 
     // Initialize FPS timer
     QueryPerformanceFrequency(&fpsFrequency);
@@ -419,21 +420,21 @@ static void InitBackbuffer(HWND hwnd)
 
     // Set diffusion method based on toggle and CPU capability
     if (useSIMD && HasSSE2())
-        diffuseHeat = DiffuseSSE2;
+        gDiffuseHeat = DiffuseSSE2;
     else
-        diffuseHeat = DiffuseScalar;
+        gDiffuseHeat = DiffuseScalar;
 
     SpawnParticles(INITIAL_PARTICLE_RESERVE);
 }
 
 // ------------------------------------------------------------
-// SpawnParticlesRandom: populate the particle array with stationary particles
+// SpawnParticlesRandom: populate the particle array with stationary gParticles
 // at random screen positions. Matches original's startup state:
 // zero velocity, random position inset from edges, heat 128-255.
 // ------------------------------------------------------------
 static void SpawnParticlesRandom(int count)
 {
-    particles.clear();
+    gParticles.clear();
     for (int i = 0; i < count; i++)
     {
         float x = (float)(5 + (int)(rng() % (gW - 10)));  // inset 5px (matching original)
@@ -446,21 +447,21 @@ static void SpawnParticlesRandom(int count)
 // EmitStartupBurst: directed spawn from bottom-center.
 // Particles fan downward in a ±45° spread, bounce off the floor,
 // and rise naturally — giving a satisfying ignition effect on launch.
-// Speed is modest so particles linger at the bottom briefly before
+// Speed is modest so gParticles linger at the bottom briefly before
 // bouncing. Toggle via useStartupEmitter; tie to a control later.
 // ------------------------------------------------------------
 static void EmitStartupBurst(int count)
 {
-    particles.clear();
-    particles.reserve(count);  // pre-reserve so drip-feed doesn't reallocate repeatedly
+    gParticles.clear();
+    gParticles.reserve(count);  // pre-reserve so drip-feed doesn't reallocate repeatedly
 
     gPendingBurst.clear();
     gPendingBurst.reserve(count);
 
     const float cx        = gW * 0.5f;
-    const float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier * 0.2f;
+    const float baseSpeed = gParticleSpeedFactor * gW * userSpeedMultiplier * 0.2f;
     const float SPREAD    = PI * 0.25f;  // ±45° around straight down
-    const float DURATION  = 0.75f;       // seconds over which all particles spawn
+    const float DURATION  = 0.75f;       // seconds over which all gParticles spawn
 
     for (int i = 0; i < count; i++)
     {
@@ -509,9 +510,9 @@ static void SpawnParticles(int count)
 }
 
 // ------------------------------------------------------------
-// DrainPendingBurst: called once per frame. Moves any particles
+// DrainPendingBurst: called once per frame. Moves any gParticles
 // whose delay has elapsed from the pending list into the live
-// particles vector. No-ops instantly when the burst is complete.
+// gParticles vector. No-ops instantly when the burst is complete.
 // ------------------------------------------------------------
 static void DrainPendingBurst()
 {
@@ -525,7 +526,7 @@ static void DrainPendingBurst()
     while (gPendingBurstIdx < (int)gPendingBurst.size() &&
            gPendingBurst[gPendingBurstIdx].delay <= elapsed)
     {
-        particles.push_back(gPendingBurst[gPendingBurstIdx].p);
+        gParticles.push_back(gPendingBurst[gPendingBurstIdx].p);
         gPendingBurstIdx++;
     }
 }
@@ -601,14 +602,14 @@ static void UpdateResDisplay()
 // ------------------------------------------------------------
 static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
 {
-    int particleCount = (int)particles.size()
+    int particleCount = (int)gParticles.size()
                       + (int)(gPendingBurst.size() - gPendingBurstIdx);
 
     // --- Free old buffers ---
     if (gHeat)      { VirtualFree(gHeat, 0, MEM_RELEASE); gHeat = nullptr; }
-    if (sDibSection){ DeleteObject(sDibSection); sDibSection = nullptr; }
+    if (gDibSection){ DeleteObject(gDibSection); gDibSection = nullptr; }
     gPixels  = nullptr;
-    pixelMem = nullptr;
+    gPixelMem = nullptr;
 
     // --- Update dimensions ---
     gW = newW;
@@ -620,10 +621,10 @@ static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
 
     // --- Recreate DIBSection ---
     HDC hdc = GetDC(hwnd);
-    sDibSection = CreateDIBSection(hdc, &gBmi, DIB_RGB_COLORS, &gPixels, nullptr, 0);
+    gDibSection = CreateDIBSection(hdc, &gBmi, DIB_RGB_COLORS, &gPixels, nullptr, 0);
     ReleaseDC(hwnd, hdc);
-    if (!sDibSection || !gPixels) return;
-    pixelMem = (uint32_t*)gPixels;
+    if (!gDibSection || !gPixels) return;
+    gPixelMem = (uint32_t*)gPixels;
 
     // --- Reallocate heat buffer ---
     gHeat = (uint8_t*)VirtualAlloc(nullptr, (size_t)gW * (size_t)gH,
@@ -650,7 +651,7 @@ static void ChangeResolution(HWND hwnd, int newW, int newH, bool resizeWindow)
                      SWP_NOMOVE | SWP_NOZORDER);
     }
 
-    // --- Respawn particles at positions valid for the new buffer ---
+    // --- Respawn gParticles at positions valid for the new buffer ---
     SpawnParticles(particleCount > 0 ? particleCount : INITIAL_PARTICLE_RESERVE);
 
     UpdateResDisplay();
@@ -675,22 +676,22 @@ static void EmitParticle(float x, float y, float speed)
     p.active = true;
     p.leaderIdx = -1;     // no leader assigned
 
-    particles.push_back(p);
+    gParticles.push_back(p);
 }
 
 // ------------------------------------------------------------
-// EmitFirework: spawn many particles in all directions from a point.
+// EmitFirework: spawn many gParticles in all directions from a point.
 // Each explosion gets a random max speed (50%-100% of base), and each
 // particle gets a random speed from 0 to that max. This creates a
 // filled disc rather than a ring, and each explosion feels different.
 // ------------------------------------------------------------
 static void EmitFirework(float x, float y, int count)
 {
-    // Clear existing particles
-    particles.clear();
+    // Clear existing gParticles
+    gParticles.clear();
 
     // Calculate base speed, then pick a random max for this explosion
-    float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+    float baseSpeed = gParticleSpeedFactor * gW * userSpeedMultiplier;
     float maxSpeed = baseSpeed * (0.5f + chance(rng));  // 50%-150% of base → [4.0, 12.0] at original speeds
 
     for (int i = 0; i < count; i++)
@@ -739,7 +740,7 @@ static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t 
     }
 }
 
-// AltColor: particles fade per-frame and brighten on wall bounce
+// AltColor: gParticles fade per-frame and brighten on wall bounce
 // TODO: Add this as a toggle in the dialog box.
 static bool useAltColor = false;
 static const uint8_t HEAT_FADE = 1;         // heat lost per frame per particle
@@ -750,16 +751,16 @@ static const uint8_t BOUNCE_BRIGHTEN = 32;  // heat gained on wall bounce
 static const float BOUNCE = 0.95f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
 static const float KICK_STRENGTH = 0.5f;    // max random perpendicular kick on bounce
 
-// Attraction steering: how fast particles turn toward their target (0.0 = no turn, 1.0 = instant)
+// Attraction steering: how fast gParticles turn toward their target (0.0 = no turn, 1.0 = instant)
 static const float STEER_RATE = 0.05f;
 
 // ------------------------------------------------------------
 // SteerParticles: rotate each particle's velocity toward its target.
 // Preserves speed, only changes direction. Orbiting emerges naturally
-// because the turn rate is slow enough that particles overshoot.
+// because the turn rate is slow enough that gParticles overshoot.
 //
 // Target depends on leader mode:
-//   useFollowLeader=false : all particles target cursor
+//   useFollowLeader=false : all gParticles target cursor
 //   useFollowLeader=true, useMultiLeader=false : particle 0 leads, rest follow particle 0
 //   useFollowLeader=true, useMultiLeader=true  : every 64th particle leads, rest follow their group leader
 // ------------------------------------------------------------
@@ -769,9 +770,9 @@ static void SteerParticles(float cursorX, float cursorY)
     // 0x7FFF = effectively one global leader (particle 0); 0x3F = groups of 64
     int leaderMask = useMultiLeader ? 0x3F : 0x7FFF;
 
-    for (size_t i = 0; i < particles.size(); i++)
+    for (size_t i = 0; i < gParticles.size(); i++)
     {
-        Particle& p = particles[i];
+        Particle& p = gParticles[i];
         if (!p.active) continue;
 
         // Determine this particle's steering target
@@ -781,7 +782,7 @@ static void SteerParticles(float cursorX, float cursorY)
             // Leader (or all-to-cursor mode): target cursor.
             // In follow-leader mode, only chase cursor while right mouse is held;
             // otherwise the leader drifts freely (followers still chain to it).
-            if (useFollowLeader && !rightMouseDown)
+            if (useFollowLeader && !gRightMouseDown)
                 continue;
             targetX = cursorX;
             targetY = cursorY;
@@ -791,10 +792,10 @@ static void SteerParticles(float cursorX, float cursorY)
             // Follower: target its group leader (the nearest particle whose index
             // is a multiple of leaderMask+1)
             size_t leaderIdx = i & ~(size_t)leaderMask;
-            if (leaderIdx < particles.size() && particles[leaderIdx].active)
+            if (leaderIdx < gParticles.size() && gParticles[leaderIdx].active)
             {
-                targetX = particles[leaderIdx].x;
-                targetY = particles[leaderIdx].y;
+                targetX = gParticles[leaderIdx].x;
+                targetY = gParticles[leaderIdx].y;
             }
             else
             {
@@ -804,7 +805,7 @@ static void SteerParticles(float cursorX, float cursorY)
         }
 
         // Current speed. If near-zero, use fallback angle (matching original's rotating
-        // reference direction) so stationary particles don't get stuck.
+        // reference direction) so stationary gParticles don't get stuck.
         float speed = sqrtf(p.dx * p.dx + p.dy * p.dy);
         float velAngle;
         if (speed < 0.001f)
@@ -833,13 +834,13 @@ static void SteerParticles(float cursorX, float cursorY)
 }
 
 // ------------------------------------------------------------
-// UpdateParticles: move particles, deposit heat, deactivate if off-screen
+// UpdateParticles: move gParticles, deposit heat, deactivate if off-screen
 // ------------------------------------------------------------
 static void UpdateParticles()
 {
-    for (size_t i = 0; i < particles.size(); i++)
+    for (size_t i = 0; i < gParticles.size(); i++)
     {
-        Particle& p = particles[i];
+        Particle& p = gParticles[i];
         if (!p.active) continue;
 
         // AltColor: fade heat each frame, floor at HEAT_FLOOR
@@ -1035,9 +1036,9 @@ static void DiffuseSSE2()
 // ------------------------------------------------------------
 static void RenderFire(HWND hwnd)
 {
-    if (!pixelMem || !gHeat) return;
+    if (!gPixelMem || !gHeat) return;
 
-    // Drip-feed pending startup burst particles into the live array
+    // Drip-feed pending startup burst gParticles into the live array
     DrainPendingBurst();
 
     // ----------------------------
@@ -1067,7 +1068,7 @@ static void RenderFire(HWND hwnd)
         {
             int x = bx + dx;
             int y = by + dy;
-            if (mouseDown && (unsigned)x < (unsigned)gW && (unsigned)y < (unsigned)gH)
+            if (gMouseDown && (unsigned)x < (unsigned)gW && (unsigned)y < (unsigned)gH)
             {
                 gHeat[y * gW + x] = 255;
             }
@@ -1075,7 +1076,7 @@ static void RenderFire(HWND hwnd)
 
     // ----------------------------
     // 1b) Advance fallback angle (rotates 0.01 rad/frame, wraps at ±PI)
-    // Used by SteerParticles to give stationary particles a starting direction
+    // Used by SteerParticles to give stationary gParticles a starting direction
     // ----------------------------
     gFallbackAngle += 0.01f;
     if (gFallbackAngle > PI) gFallbackAngle -= PI * 2.0f;
@@ -1083,7 +1084,7 @@ static void RenderFire(HWND hwnd)
     // ----------------------------
     // 1c) Random events (auto-mode): 5% chance per second of a random event
     // ----------------------------
-    if (useRandEvents && !particles.empty())
+    if (useRandEvents && !gParticles.empty())
     {
         time_t nowSec = time(nullptr);
         if (nowSec != gLastRandEventSec)
@@ -1104,22 +1105,22 @@ static void RenderFire(HWND hwnd)
                     }
                     break;
 
-                case 1: // Freeze all particles
-                    for (auto& p : particles) { p.dx = 0; p.dy = 0; }
+                case 1: // Freeze all gParticles
+                    for (auto& p : gParticles) { p.dx = 0; p.dy = 0; }
                     break;
 
                 case 2: // Explosion at random position
                     EmitFirework((float)(rng() % gW), (float)(rng() % gH),
-                                 (int)particles.size());
+                                 (int)gParticles.size());
                     break;
 
-                case 3: // Comet: all particles to same random position + direction
+                case 3: // Comet: all gParticles to same random position + direction
                 {
                     float cx    = (float)(rng() % gW);
                     float cy    = (float)(rng() % gH);
                     float angle = angleDist(rng);
-                    float spd   = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
-                    for (auto& p : particles)
+                    float spd   = gParticleSpeedFactor * gW * userSpeedMultiplier;
+                    for (auto& p : gParticles)
                     {
                         p.x = cx; p.y = cy;
                         p.dx = cosf(angle) * spd;
@@ -1128,8 +1129,8 @@ static void RenderFire(HWND hwnd)
                     break;
                 }
 
-                case 4: // Emit to center: all particles converge on screen center
-                    for (auto& p : particles)
+                case 4: // Emit to center: all gParticles converge on screen center
+                    for (auto& p : gParticles)
                     {
                         p.x  = gW * 0.5f;
                         p.y  = gH * 0.5f;
@@ -1143,25 +1144,25 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 1d) Steer particles
+    // 1d) Steer gParticles
     // Follow-leader mode: always call so followers chain to leaders every frame.
     //   Leaders only target cursor when right mouse is held.
     // Normal mode: only steer when left mouse is held (original behavior).
     // ----------------------------
-    if (!particles.empty() && (useFollowLeader || mouseDown))
+    if (!gParticles.empty() && (useFollowLeader || gMouseDown))
     {
         SteerParticles((float)bx, (float)by);
     }
 
     // ----------------------------
-    // 1c) Update particles - move them and deposit heat
+    // 1c) Update gParticles - move them and deposit heat
     // ----------------------------
     UpdateParticles();
 
     // ----------------------------
     // 2) Update heat using active diffusion method (scalar or SIMD)
     // ----------------------------
-    diffuseHeat();
+    gDiffuseHeat();
 
     // ----------------------------
     // 3) Sparkles: brighten one random dark pixel per row for shimmer effect
@@ -1243,7 +1244,7 @@ static void RenderFire(HWND hwnd)
     // Each frame we "paint" the heat field into the visible pixel buffer.
     for (int i = 0; i < gW * gH; i++)
     {
-        pixelMem[i] = gPalette[gHeat[i]];
+        gPixelMem[i] = gPalette[gHeat[i]];
     }
 
     // ----------------------------
@@ -1419,7 +1420,7 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
             {
                 currentPalette = sel;
                 const ColorScheme& cs = PALETTE_PRESETS[currentPalette];
-                BuildPalette(cs.r1, cs.g1, cs.b1, cs.r2, cs.g2, cs.b2);
+                BuildPalette(cs);
             }
         }
         else if (controlId == IDC_CHECK_FULLSCREEN && notifyCode == BN_CLICKED)
@@ -1434,9 +1435,9 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
         {
             useSIMD = (IsDlgButtonChecked(hDlg, IDC_CHECK_SIMD) == BST_CHECKED);
             if (useSIMD && HasSSE2())
-                diffuseHeat = DiffuseSSE2;
+                gDiffuseHeat = DiffuseSSE2;
             else
-                diffuseHeat = DiffuseScalar;
+                gDiffuseHeat = DiffuseScalar;
         }
         else if (controlId == IDC_PERLIN_FIRE && notifyCode == BN_CLICKED)
         {
@@ -1480,11 +1481,11 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
                     SendDlgItemMessage(hDlg, IDC_EDIT_PARTICLES, EM_SETSEL, -1, -1);
                 }
 
-                int current = (int)particles.size()
+                int current = (int)gParticles.size()
                             + (int)(gPendingBurst.size() - gPendingBurstIdx);
                 if (count > current)
                 {
-                    // Grow: append new particles at random positions with zero velocity
+                    // Grow: append new gParticles at random positions with zero velocity
                     for (int i = current; i < count; i++)
                     {
                         float x = (float)(5 + (int)(rng() % (gW - 10)));
@@ -1495,7 +1496,7 @@ INT_PTR CALLBACK ControlPanelProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPa
                 else if (count < current)
                 {
                     // Shrink: drop from the end of the array
-                    particles.resize(count);
+                    gParticles.resize(count);
                 }
             }
         }
@@ -1530,7 +1531,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (gPixels)
         {
-            // Run the simulation + render into pixelMem
+            // Run the simulation + render into gPixelMem
             RenderFire(hwnd);
 
             // Blit (scaled) to the window
@@ -1570,7 +1571,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONDOWN:
     {
-        mouseDown = true;
+        gMouseDown = true;
 
         // Store mouse position in *window* coordinates.
         gMouseX = GET_X_LPARAM(lParam);
@@ -1596,13 +1597,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_LBUTTONUP:
-        mouseDown = false;
+        gMouseDown = false;
         ReleaseCapture();
         return 0;
 
     case WM_RBUTTONDOWN:
     {
-        rightMouseDown = true;
+        gRightMouseDown = true;
 
         // Convert window coords to buffer coords
         RECT rc;
@@ -1616,12 +1617,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         int bx = mx * gW / (winW ? winW : 1);
         int by = my * gH / (winH ? winH : 1);
 
-        EmitFirework((float)bx, (float)by, (int)particles.size());
+        EmitFirework((float)bx, (float)by, (int)gParticles.size());
         return 0;
     }
 
     case WM_RBUTTONUP:
-        rightMouseDown = false;
+        gRightMouseDown = false;
         return 0;
 
     case WM_SYSKEYDOWN:
@@ -1642,41 +1643,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == VK_SPACE)
         {
-            // Freeze all particles
-            for (size_t i = 0; i < particles.size(); i++)
+            // Freeze all gParticles
+            for (size_t i = 0; i < gParticles.size(); i++)
             {
-                particles[i].dx = 0;
-                particles[i].dy = 0;
+                gParticles[i].dx = 0;
+                gParticles[i].dy = 0;
             }
         }
         else if (wParam == VK_RETURN)
         {
-            // Comet: all particles at same random position, same random direction
+            // Comet: all gParticles at same random position, same random direction
             float cx = (float)(rng() % gW);
             float cy = (float)(rng() % gH);
             float angle = angleDist(rng);
-            float baseSpeed = PARTICLE_SPEED_FACTOR * gW * userSpeedMultiplier;
+            float baseSpeed = gParticleSpeedFactor * gW * userSpeedMultiplier;
             float cdx = cosf(angle) * baseSpeed;
             float cdy = sinf(angle) * baseSpeed;
-            for (size_t i = 0; i < particles.size(); i++)
+            for (size_t i = 0; i < gParticles.size(); i++)
             {
-                particles[i].x = cx;
-                particles[i].y = cy;
-                particles[i].dx = cdx;
-                particles[i].dy = cdy;
+                gParticles[i].x = cx;
+                gParticles[i].y = cy;
+                gParticles[i].dx = cdx;
+                gParticles[i].dy = cdy;
             }
         }
         else if (wParam == VK_BACK)
         {
-            // Send all particles to center of buffer, stopped
+            // Send all gParticles to center of buffer, stopped
             float cx = gW * 0.5f;
             float cy = gH * 0.5f;
-            for (size_t i = 0; i < particles.size(); i++)
+            for (size_t i = 0; i < gParticles.size(); i++)
             {
-                particles[i].x = cx;
-                particles[i].y = cy;
-                particles[i].dx = 0;
-                particles[i].dy = 0;
+                gParticles[i].x = cx;
+                gParticles[i].y = cy;
+                gParticles[i].dx = 0;
+                gParticles[i].dy = 0;
             }
         }
         return 0;
