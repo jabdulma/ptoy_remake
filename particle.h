@@ -9,3 +9,5 @@ struct Particle {
     bool active;     // is this particle alive?
     int leaderIdx;   // -1 = no leader, 0+ = index into leader array (future use)
 };
+
+struct PendingParticle { Particle p; float delay; };

@@ -69,7 +69,7 @@ Nearly every module touches the simulation settings flags, `gW`/`gH`, `gHeat`, a
 
 | File | What it contains | Approx. lines |
 |------|-----------------|---------------|
-| `globals.h` | `extern` declarations for all shared simulation state; shared struct defs (`ResPreset`, `ColorScheme`, `PendingParticle`, `ControlHint`) | new, ~80 |
+| `globals.h` | `extern` declarations for all shared simulation state; shared struct defs (`ResPreset`, `ColorScheme`, `ControlHint`) | new, ~80 |
 | `perlin.cpp/.h` | `InitPerlinTable()`, `PerlinNoise2D()`, all Perlin tables and constants | extracted, ~60 |
 | `fire_sim.cpp/.h` | `BuildPalette()`, `DiffuseScalar()`, `DiffuseSSE2()`, `HasSSE2()`, `diffuseHeat` pointer, `PALETTE_PRESETS` | extracted, ~200 |
 | `particles.cpp/.h` | `EmitParticle()`, `EmitFirework()`, `SpawnParticles*()`, `DrainPendingBurst()`, `UpdateParticles()`, `SteerParticles()`, `DepositHeatLine[Heavy]()`, speed system, bounce constants | extracted, ~380 |
@@ -88,14 +88,14 @@ Do each step, build (`msbuild /p:Configuration=Release /p:Platform=x64`), run a 
   - Verify: Perlin fire mode still produces smooth animated flame base
 
 - [ ] **Step 2 — `fire_sim.cpp/.h`**
-  - Move: `ColorScheme`, `PALETTE_PRESETS`, `NUM_PALETTE_PRESETS`, `BuildPalette()`, `SPARKLE_LOW`/`SPARKLE_HIGH`, `HasSSE2()`, `diffuseHeat` function pointer + `using DiffusionFunc`, `DiffuseScalar()`, `DiffuseSSE2()`
+  - Move: `ColorScheme`, `PALETTE_PRESETS`, `NUM_PALETTE_PRESETS`, `BuildPalette()`, `SPARKLE_LOW`/`SPARKLE_HIGH`, `HasSSE2()`, `gDiffuseHeat` function pointer + `using DiffusionFunc`, `DiffuseScalar()`, `DiffuseSSE2()`
   - Also extract the inline sparkle block from `RenderFire()` into a `SparkleEffect()` function here — keeps the constants and logic together, and puts the pre-generated table (performance TODO) in the right place when that work happens
   - Externs needed: `gHeat`, `gW`, `gH`, `gPalette`, `BURNFADE`, `BORDER_MARGIN`, `useSIMD`, `useNitro`, `useSparkles`, `rng`
   - Verify: fire diffuses, SIMD toggle switches implementations, palette changes work, sparkles still shimmer
 
 - [ ] **Step 3 — `particles.cpp/.h`**
   - Move: `PendingParticle` struct, `gPendingBurst`, `gBurstStartTime`, `gPendingBurstIdx`, `gFallbackAngle`, speed system constants + `UpdateSpeedFactor()`, bounce/steer constants (`BOUNCE`, `KICK_STRENGTH`, `STEER_RATE`), AltColor state (`useAltColor`, `HEAT_FADE`, `HEAT_FLOOR`, `BOUNCE_BRIGHTEN`), `EmitParticle()`, `EmitFirework()`, `SpawnParticlesRandom()`, `EmitStartupBurst()`, `SpawnParticles()`, `DrainPendingBurst()`, `SteerParticles()`, `UpdateParticles()`, `DepositHeatLine()`, `DepositHeatLineHeavy()`
-  - Externs needed: `gHeat`, `gW`, `gH`, `particles`, `rng` + distributions, all `use*` / gravity flags, `PARTICLE_SPEED_FACTOR`, `fpsFrequency`, `gControlPanel`, `mouseDown`, `rightMouseDown`
+  - Externs needed: `gHeat`, `gW`, `gH`, `gParticles`, `rng` + distributions, all `use*` / gravity flags, `gParticleSpeedFactor`, `gFpsFrequency`, `gControlPanel`, `gMouseDown`, `gRightMouseDown`
   - Verify: particles move, bounce, deposit heat, startup burst drip-feeds correctly
 
 - [ ] **Step 4 — `dialog.cpp`**
@@ -112,7 +112,7 @@ Do each step, build (`msbuild /p:Configuration=Release /p:Platform=x64`), run a 
 ### Gotchas to watch for
 
 - `rng` and the `dist`/`angleDist`/`speedVariance`/`chance` distribution objects are used by Perlin, fire seeding, and particle spawning — define them once in `MakeFireTest.cpp`, declare `extern` in `globals.h`
-- `PendingParticle` is currently defined inline in `MakeFireTest.cpp`; move its definition to `particles.h` before extracting
+- `PendingParticle` is defined in `particle.h` (already done)
 - `ControlPanelProc` calls `ChangeResolution()`, `BuildPalette()`, `SpawnParticles()`, `EmitParticle()`, `ToggleFullscreen()` — those functions must be declared in the headers of the files they move to
 - `BURNFADE` and `BORDER_MARGIN` are `const int` — if used in multiple translation units, declare them `inline constexpr` in `globals.h` or give them external linkage explicitly
 - Forward declarations in `MakeFireTest.cpp` (lines ~238–244) become redundant once proper headers exist — remove them to avoid confusion

@@ -50,6 +50,12 @@ static bool  useRandEvents       = false;     // IDC_CHECK_RANDEVENT
 static bool  useSparkles         = true;     // future: sparkle toggle
 static bool  useFrameLimiter     = false;    // future: frame rate limiter
 static bool  useStartupEmitter   = true;     // directed bottom-center burst on spawn
+static bool  useAltColor         = false;    // future: per-frame heat fade + bounce brightening
+
+// AltColor tuning
+static const uint8_t HEAT_FADE       = 1;   // heat lost per frame per particle
+static const uint8_t HEAT_FLOOR      = 128; // minimum heat (particles never go fully dark)
+static const uint8_t BOUNCE_BRIGHTEN = 32;  // heat gained on wall bounce
 
 // ============================================================
 // ENGINE INTERNALS
@@ -89,10 +95,12 @@ static HBITMAP    gDibSection = nullptr;    // DIBSection handle; file-scope for
 static uint8_t*  gHeat      = nullptr;      // simulation buffer: 1 byte per pixel
 static uint32_t  gPalette[256] = {};        // palette[heat] -> 0x00RRGGBB
 
+static const float PI = 3.14159265f;
+
 // RNG
 static std::mt19937 rng{ std::random_device{}() };
 static std::uniform_int_distribution<int>    dist(0, 255);
-static std::uniform_real_distribution<float> angleDist(0.0f, 6.283185f);   // 0 to 2*PI
+static std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * PI);  // 0 to 2*PI
 static std::uniform_real_distribution<float> speedVariance(0.85f, 1.15f);  // ±15% speed variance
 static std::uniform_real_distribution<float> chance(0.0f, 1.0f);           // for percentage rolls
 
@@ -127,9 +135,13 @@ static bool gRightMouseDown = false;
 static HWND gControlPanel = nullptr;
 
 // Simulation constants
-static const float PI           = 3.14159265f;
-static const int   BORDER_MARGIN = 1;   // skip 1-pixel border for bounds safety
-static const int   BURNFADE      = 6;   // heat decay rate per frame
+static const int   BORDER_MARGIN = 1;      // skip 1-pixel border for bounds safety
+static const int   BURNFADE      = 6;      // heat decay rate per frame
+
+// Physics tuning
+static const float BOUNCE        = 0.95f;  // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
+static const float KICK_STRENGTH = 0.5f;   // max random perpendicular kick on bounce
+static const float STEER_RATE   = 0.05f;   // how fast particles turn toward target (0.0 = no turn, 1.0 = instant)
 
 // Particle steering
 static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped gParticles a direction
@@ -138,7 +150,6 @@ static float gFallbackAngle = 0.0f;  // rotates each frame; gives stopped gParti
 static time_t gLastRandEventSec = 0; // wall-clock second of last event check
 
 // Startup burst drip-feed state
-struct PendingParticle { Particle p; float delay; };
 static std::vector<PendingParticle> gPendingBurst;
 static LARGE_INTEGER gBurstStartTime = {};
 static int gPendingBurstIdx  = 0;
@@ -257,14 +268,14 @@ static bool HasSSE2()
 }
 
 // FPS tracking
-static LARGE_INTEGER fpsFrequency = {};    // ticks per second
-static LARGE_INTEGER fpsLastTime = {};     // last time we updated FPS display
-static int fpsFrameCount = 0;             // frames since last update
+static LARGE_INTEGER gFpsFrequency = {};    // ticks per second
+static LARGE_INTEGER gFpsLastTime = {};     // last time we updated FPS display
+static int gFpsFrameCount = 0;             // frames since last update
 
 // Frame limiter
-//A note about frame rate.  The particle fire screensaver is set to 25fps.
-//But particle toy runs smoother than that.  It's either 60fps, or the screen's
-//refresh rate.  We won't know with decompiling it... or doing some screen recording
+//A note about frame rate.  The original particle toy basically runs as fast as possible.
+//On a modern PC that is insanely fast so we have FPS and movement options built in.
+//The particle fire screensaver runs at 25fps, not something we need to implement anytime soon.
 
 static int gRefreshRate = 60;                       // detected monitor refresh rate
 static double gTargetFrameTime = 1.0 / 60.0;       // seconds per frame
@@ -303,8 +314,9 @@ static const ColorScheme PALETTE_PRESETS[] = {
     {   0, 255,   0,  255, 255,  55,  L"Terry's Green" },
     {  32, 128,  32,  160, 255, 160,  L"Slimy Green"   },
     { 255,  64,  64,  255, 192, 192,  L"Burning Pink"  },
+    {   0, 153, 153,  129, 216, 208,  L"Cancan's Blue"   },
 };
-static const int NUM_PALETTE_PRESETS = sizeof(PALETTE_PRESETS) / sizeof(PALETTE_PRESETS[0]);
+static const int NUM_PALETTE_PRESETS = _countof(PALETTE_PRESETS);
 
 // ------------------------------------------------------------
 // BuildPalette: two-color spread palette with optional "nitro" boost.
@@ -405,8 +417,8 @@ static void InitBackbuffer(HWND hwnd)
     gParticles.reserve(INITIAL_PARTICLE_RESERVE);
 
     // Initialize FPS timer
-    QueryPerformanceFrequency(&fpsFrequency);
-    QueryPerformanceCounter(&fpsLastTime);
+    QueryPerformanceFrequency(&gFpsFrequency);
+    QueryPerformanceCounter(&gFpsLastTime);
     QueryPerformanceCounter(&gLastFrameTime);
 
     // Detect monitor refresh rate for frame limiter
@@ -521,7 +533,7 @@ static void DrainPendingBurst()
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     float elapsed = (float)(now.QuadPart - gBurstStartTime.QuadPart)
-                  / (float)fpsFrequency.QuadPart;
+                  / (float)gFpsFrequency.QuadPart;
 
     while (gPendingBurstIdx < (int)gPendingBurst.size() &&
            gPendingBurst[gPendingBurstIdx].delay <= elapsed)
@@ -664,15 +676,15 @@ static void EmitParticle(float x, float y, float speed)
 {
     float angle = angleDist(rng);
 
-    Particle p;
+    Particle p = {};
     p.x = x;
     p.y = y;
-    //The speed here works as such - cos gives us x part of speed, sin gives us y.  Combined gives us the direction and full speed.
-    //Using trig will let us preserve speed properly since cos² + sin² = 1
+    // The speed here works as such - cos gives us x part of speed, sin gives us y.  Combined gives us the direction and full speed.
+    // Using trig will let us preserve speed properly since cos² + sin² = 1
     p.dx = cosf(angle) * speed;
     p.dy = sinf(angle) * speed;
     p.heat = 128 + (dist(rng) % 128);  // range 128-255, matching original
-    p.color = 0x00FFFFFF;  // white for now
+    p.color = 0x00FFFFFF;  // white initial value
     p.active = true;
     p.leaderIdx = -1;     // no leader assigned
 
@@ -721,7 +733,7 @@ static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t 
     int sy  = (y0 < y1) ? 1 : -1;
     int err = dx - dy;
 
-    for (;;) //Run this infinite loop until we're at the target
+    while (true) // Run until we reach the target pixel
     {
         // 3-pixel vertical strip at (x0, y0): center, above, below.
         // Unsigned cast turns negative coords into large values, failing the < gW/gH check — safe one-shot bounds test.
@@ -739,20 +751,6 @@ static void DepositHeatLine(float x0f, float y0f, float x1f, float y1f, uint8_t 
         if (e2 <  dx) { err += dx; y0 += sy; }
     }
 }
-
-// AltColor: gParticles fade per-frame and brighten on wall bounce
-// TODO: Add this as a toggle in the dialog box.
-static bool useAltColor = false;
-static const uint8_t HEAT_FADE = 1;         // heat lost per frame per particle
-static const uint8_t HEAT_FLOOR = 128;      // minimum heat (particles never go fully dark)
-static const uint8_t BOUNCE_BRIGHTEN = 32;  // heat gained on wall bounce
-
-// Bounce tuning
-static const float BOUNCE = 0.95f;           // speed retained on bounce (1.0 = perfect, <1.0 = loses energy)
-static const float KICK_STRENGTH = 0.5f;    // max random perpendicular kick on bounce
-
-// Attraction steering: how fast gParticles turn toward their target (0.0 = no turn, 1.0 = instant)
-static const float STEER_RATE = 0.05f;
 
 // ------------------------------------------------------------
 // SteerParticles: rotate each particle's velocity toward its target.
@@ -1155,7 +1153,7 @@ static void RenderFire(HWND hwnd)
     }
 
     // ----------------------------
-    // 1c) Update gParticles - move them and deposit heat
+    // 1e) Update gParticles - move them and deposit heat
     // ----------------------------
     UpdateParticles();
 
@@ -1250,18 +1248,18 @@ static void RenderFire(HWND hwnd)
     // ----------------------------
     // 7) Update FPS counter
     // ----------------------------
-    fpsFrameCount++;
+    gFpsFrameCount++;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    double elapsed = (double)(now.QuadPart - fpsLastTime.QuadPart) / fpsFrequency.QuadPart;
+    double elapsed = (double)(now.QuadPart - gFpsLastTime.QuadPart) / gFpsFrequency.QuadPart;
     if (elapsed >= 1.0)
     {
         if (gControlPanel)
         {
-            SetDlgItemInt(gControlPanel, IDC_FPSLIVE, fpsFrameCount, FALSE);
+            SetDlgItemInt(gControlPanel, IDC_FPSLIVE, gFpsFrameCount, FALSE);
         }
-        fpsFrameCount = 0;
-        fpsLastTime = now;
+        gFpsFrameCount = 0;
+        gFpsLastTime = now;
     }
     // Original speed mode: Sleep(1) each frame to match the original ptoy's loop pacing.
     // The original called Sleep(1) unconditionally in its main loop, which on Windows
@@ -1559,7 +1557,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             double elapsed;
             do {
                 QueryPerformanceCounter(&now);
-                elapsed = (double)(now.QuadPart - gLastFrameTime.QuadPart) / fpsFrequency.QuadPart;
+                elapsed = (double)(now.QuadPart - gLastFrameTime.QuadPart) / gFpsFrequency.QuadPart;
             } while (elapsed < gTargetFrameTime);
             gLastFrameTime = now;
         }
